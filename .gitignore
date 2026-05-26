@@ -17,3 +17,5 @@ data/
 # Agent Cred
 .claude/settings.json
 
+# Dev
+notebooks/
