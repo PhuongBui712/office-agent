@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+.sdkvenv/
+*.egg-info/
+build/
+dist/
+.env
+.pytest_cache/
+
+# Virtual environment
+.venv
+
+# data
+data/
+
+# Agent Cred
+.claude/settings.json
+
