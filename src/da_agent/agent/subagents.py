@@ -4,6 +4,7 @@ The main agent dispatches these via the `Task` tool during a complex investigati
 Defining them programmatically (AgentDefinition) keeps orchestration in code while the
 prompts stay editable.
 """
+
 from __future__ import annotations
 
 from claude_agent_sdk import AgentDefinition

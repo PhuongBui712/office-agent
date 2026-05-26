@@ -4,6 +4,7 @@ This is the reusable core. It knows nothing about rich or prompt_toolkit; it onl
 to an `AgentUI`. A web backend would construct an `AgentRunner` with a websocket-backed
 UI and get the same behavior.
 """
+
 from __future__ import annotations
 
 import os
@@ -25,20 +26,29 @@ from claude_agent_sdk import (
 
 from ..config import Settings
 from ..ui.base import AgentUI
-from .events import QuestionRequest, QuestionResponse, PlanDecision
+from .events import PlanDecision, QuestionRequest, QuestionResponse
 from .permissions import make_can_use_tool
 from .prompts import build_system_prompt
 from .subagents import build_subagents
-from .tools import QUALIFIED_TOOL_NAME, build_interaction_server
+from .todos import TodoStore, TODO_TOOL_NAMES
 
-# Tool calls we handle through dedicated interactive UI, so we don't double-render them
-# as ordinary "tool step" lines.
-_INTERACTIVE_TOOLS = {QUALIFIED_TOOL_NAME, "ExitPlanMode"}
+# Tool calls we drive via dedicated interactive UI (built-ins from the CLI). They never
+# render as ordinary tool steps -- the matching UI surface (selector / plan approval /
+# todo overlay) renders them instead.
+_INTERACTIVE_TOOLS = {"AskUserQuestion", "ExitPlanMode"} | TODO_TOOL_NAMES
 
 _BASE_TOOLS = [
-    "Read", "Write", "Edit", "Bash", "Glob", "Grep",
-    "TodoWrite", "NotebookEdit", "Task", "ExitPlanMode",
-    QUALIFIED_TOOL_NAME,
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Glob",
+    "Grep",
+    "TodoWrite",
+    "NotebookEdit",
+    "Task",
+    "ExitPlanMode",
+    "AskUserQuestion",
 ]
 
 
@@ -49,6 +59,7 @@ class AgentRunner:
         self.settings.ensure_dirs()
         self._client: ClaudeSDKClient | None = None
         self._first_block = True
+        self._todos = TodoStore()
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -65,21 +76,23 @@ class AgentRunner:
 
     def _build_options(self) -> ClaudeAgentOptions:
         s = self.settings
-        server = build_interaction_server(lambda: self.ui)
         can_use_tool = make_can_use_tool(
             ask_plan=self._ask_plan,
             on_approved=self._on_plan_approved,
+            ask_question=self._ask_question,
         )
         env = dict(os.environ)
         # Keep SDK session JSONL under the tool's own data dir.
         env["CLAUDE_CONFIG_DIR"] = str(s.sessions_dir)
+        # Keep the legacy TodoWrite tool path active for backwards compatibility, but the
+        # runner accepts both that and the newer Task* tool family transparently.
+        env.setdefault("CLAUDE_CODE_ENABLE_TASKS", "1")
 
         return ClaudeAgentOptions(
             cwd=str(s.project_root),
-            setting_sources=["project"],      # discover .claude/skills
-            skills=["xlsx"],                  # enable only the spreadsheet skill
+            setting_sources=["project"],  # discover .claude/skills
+            skills=["xlsx"],  # enable only the spreadsheet skill
             system_prompt=build_system_prompt(s),
-            mcp_servers={"interaction": server},
             agents=build_subagents(),
             allowed_tools=_BASE_TOOLS,
             can_use_tool=can_use_tool,
@@ -100,7 +113,12 @@ class AgentRunner:
             self.ui.on_user_prompt(prompt)
         self._first_block = True
         started = time.monotonic()
+        # begin_wait BEFORE the empty todos snapshot so the bottom-anchored overlay
+        # transitions through "label only" rather than collapsing and re-mounting --
+        # otherwise the live region briefly stops between turns and the spinner flickers.
         self.ui.begin_wait("Thinking")
+        self._todos.reset()
+        self.ui.on_todos(self._todos.snapshot())
         try:
             await self._client.query(prompt)
             async for message in self._client.receive_response():
@@ -139,6 +157,9 @@ class AgentRunner:
             if block.text.strip():
                 self.ui.on_text(block.text)
         elif isinstance(block, ToolUseBlock):
+            if block.name in TODO_TOOL_NAMES:
+                self._absorb_todo_tool_use(block)
+                return
             if block.name in _INTERACTIVE_TOOLS:
                 return  # handled by dedicated interactive UI
             self.ui.on_tool_use(block.name, block.input or {}, depth=depth)
@@ -146,14 +167,32 @@ class AgentRunner:
             self.ui.begin_wait(f"Running {block.name}")
 
     def _render_tool_result(self, block: ToolResultBlock, depth: int) -> None:
+        if self._todos.is_pending(block.tool_use_id):
+            self._absorb_todo_tool_result(block)
+            return
         summary = _stringify_tool_result(block.content)
         self.ui.on_tool_result(summary, is_error=bool(block.is_error), depth=depth)
 
     # ------------------------------------------------------------------ #
-    # interaction hooks (called from tool handler / permission callback)
+    # todo plumbing
+    # ------------------------------------------------------------------ #
+    def _absorb_todo_tool_use(self, block: ToolUseBlock) -> None:
+        if self._todos.observe_tool_use(block.id, block.name, block.input or {}):
+            self.ui.on_todos(self._todos.snapshot())
+
+    def _absorb_todo_tool_result(self, block: ToolResultBlock) -> None:
+        text = _stringify_tool_result(block.content)
+        if self._todos.observe_tool_result(block.tool_use_id, text):
+            self.ui.on_todos(self._todos.snapshot())
+
+    # ------------------------------------------------------------------ #
+    # interaction hooks (called from permission callback)
     # ------------------------------------------------------------------ #
     async def _ask_plan(self, plan: str) -> PlanDecision:
         return await self.ui.approve_plan(plan)
+
+    async def _ask_question(self, request: QuestionRequest) -> QuestionResponse:
+        return await self.ui.ask_question(request)
 
     async def _on_plan_approved(self) -> None:
         # Plan accepted: stop gating every subsequent edit; steps remain visible.

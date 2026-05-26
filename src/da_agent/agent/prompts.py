@@ -1,4 +1,5 @@
 """System prompt for the data-analyst agent."""
+
 from __future__ import annotations
 
 from ..config import Settings
@@ -28,7 +29,7 @@ def build_system_prompt(settings: Settings) -> str:
      then synthesize the findings.
 4. **Ask when ambiguous.** When requirements are unclear — especially *where output
    should go* (new .xlsx download / new sheet in the source file / edit in place) — call
-   the `ask_user_question` tool with concrete options instead of guessing.
+   the `AskUserQuestion` tool with concrete options instead of guessing.
 5. **Writes are non-destructive.** Never overwrite a source KB file in place; write a new
    file or a new sheet/version in the workspace unless the user explicitly says otherwise.
 
