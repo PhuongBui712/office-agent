@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import secrets
 import time
-from typing import Any
+from typing import Any, Callable
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -27,6 +27,7 @@ from claude_agent_sdk import (
 )
 
 from ..config import Settings
+from ..outputs import OutputDetection, OutputsObserver
 from ..ui.base import AgentUI
 from .events import PlanDecision, QuestionRequest, QuestionResponse
 from .permissions import make_can_use_tool
@@ -55,13 +56,28 @@ _BASE_TOOLS = [
 
 
 class AgentRunner:
-    def __init__(self, ui: AgentUI, settings: Settings | None = None):
+    def __init__(
+        self,
+        ui: AgentUI,
+        settings: Settings | None = None,
+        *,
+        on_output_detection: Callable[[OutputDetection], None] | None = None,
+    ):
         self.ui = ui
         self.settings = settings or Settings()
         self.settings.ensure_dirs()
         self._client: ClaudeSDKClient | None = None
         self._first_block = True
         self._todos = TodoStore()
+        # Spec §8.2 — observe Write/Edit/Bash tool calls and surface detected
+        # writes under outputs_dir/<id>/ or kb_dir/<kb_id>/versions/. CLI passes
+        # no callback (`on_output_detection=None`) and the observer becomes a
+        # silent sink; the server wires the bridge into AppState.outputs.
+        self._outputs_observer = OutputsObserver(
+            outputs_dir=self.settings.outputs_dir,
+            kb_dir=self.settings.kb_dir,
+            on_detect=on_output_detection or (lambda _det: None),
+        )
         # Per-turn streaming state. Reset in `send`.
         # `_stream_blocks`: SDK content-block index -> (kind, block_id) where
         # kind ∈ {"text", "thinking"}; tool_use indices are absent (the full
@@ -112,7 +128,12 @@ class AgentRunner:
             permission_mode="plan" if s.plan_first else "default",
             model=s.model,
             max_turns=s.max_turns,
-            add_dirs=[str(s.kb_dir), str(s.workspace_dir)],
+            add_dirs=[
+                str(s.kb_dir),
+                str(s.workspace_dir),
+                str(s.outputs_dir),
+                str(s.attachments_dir),
+            ],
             env=env,
             include_partial_messages=s.stream_responses,
         )
@@ -133,6 +154,7 @@ class AgentRunner:
         # otherwise the live region briefly stops between turns and the spinner flickers.
         self.ui.begin_wait("Thinking")
         self._todos.reset()
+        self._outputs_observer.reset()
         self.ui.on_todos(self._todos.snapshot())
         try:
             await self._client.query(prompt)
@@ -261,7 +283,17 @@ class AgentRunner:
                 return
             if block.name in _INTERACTIVE_TOOLS:
                 return  # handled by dedicated interactive UI
-            self.ui.on_tool_use(block.name, block.input or {}, depth=depth)
+            # Spec §8.2 — observe Write/Edit/Bash output sites. No-op for any
+            # other tool name (gated inside the observer).
+            self._outputs_observer.observe_tool_use(
+                block.id, block.name, block.input or {}
+            )
+            self.ui.on_tool_use(
+                block.name,
+                block.input or {},
+                depth=depth,
+                tool_use_id=block.id,
+            )
             # A tool is about to run -> show the waiting indicator again.
             self.ui.begin_wait(f"Running {block.name}")
 
@@ -270,7 +302,17 @@ class AgentRunner:
             self._absorb_todo_tool_result(block)
             return
         summary = _stringify_tool_result(block.content)
-        self.ui.on_tool_result(summary, is_error=bool(block.is_error), depth=depth)
+        # Spec §8.2 — pair the tool_result with the observed tool_use to detect
+        # output sites. The observer ignores ids it never saw.
+        self._outputs_observer.observe_tool_result(
+            block.tool_use_id, summary, bool(block.is_error)
+        )
+        self.ui.on_tool_result(
+            summary,
+            is_error=bool(block.is_error),
+            depth=depth,
+            tool_use_id=block.tool_use_id,
+        )
 
     # ------------------------------------------------------------------ #
     # todo plumbing
