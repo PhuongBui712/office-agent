@@ -109,7 +109,12 @@ class ConsoleAgentUI:
             self.on_thinking(text)
 
     def on_tool_use(
-        self, name: str, tool_input: dict[str, Any], *, depth: int = 0
+        self,
+        name: str,
+        tool_input: dict[str, Any],
+        *,
+        depth: int = 0,
+        tool_use_id: str | None = None,
     ) -> None:
         self.end_wait()
         pad = "  " * depth
@@ -120,7 +125,12 @@ class ConsoleAgentUI:
         self.console.print(head)
 
     def on_tool_result(
-        self, summary: str, *, is_error: bool = False, depth: int = 0
+        self,
+        summary: str,
+        *,
+        is_error: bool = False,
+        depth: int = 0,
+        tool_use_id: str | None = None,
     ) -> None:
         self.end_wait()
         pad = "  " * depth
@@ -155,6 +165,11 @@ class ConsoleAgentUI:
     def on_error(self, message: str) -> None:
         self.end_wait()
         self.console.print(Text(f"✗ {message}", style="bold red"))
+
+    def on_output(self, payload: dict[str, Any]) -> None:
+        # CLI does not render output cards in the live stream; the file is
+        # already on disk and the user can find it at the printed path.
+        pass
 
     def on_todos(self, snapshot: TodoSnapshot) -> None:
         self._todos = snapshot

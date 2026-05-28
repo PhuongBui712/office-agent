@@ -85,14 +85,36 @@ class WebAgentUI:
         self._emit("assistant.thinking.end", block_id=block_id)
 
     def on_tool_use(
-        self, name: str, tool_input: dict[str, Any], *, depth: int = 0
+        self,
+        name: str,
+        tool_input: dict[str, Any],
+        *,
+        depth: int = 0,
+        tool_use_id: str | None = None,
     ) -> None:
-        self._emit("tool.use", name=name, input=tool_input, depth=depth)
+        self._emit(
+            "tool.use",
+            name=name,
+            input=tool_input,
+            depth=depth,
+            tool_use_id=tool_use_id,
+        )
 
     def on_tool_result(
-        self, summary: str, *, is_error: bool = False, depth: int = 0
+        self,
+        summary: str,
+        *,
+        is_error: bool = False,
+        depth: int = 0,
+        tool_use_id: str | None = None,
     ) -> None:
-        self._emit("tool.result", summary=summary, is_error=is_error, depth=depth)
+        self._emit(
+            "tool.result",
+            summary=summary,
+            is_error=is_error,
+            depth=depth,
+            tool_use_id=tool_use_id,
+        )
 
     def on_system(self, subtype: str, data: dict[str, Any]) -> None:
         self._emit("system", subtype=subtype, data=data)
@@ -107,6 +129,12 @@ class WebAgentUI:
 
     def on_todos(self, snapshot: TodoSnapshot) -> None:
         self._emit("todos.snapshot", items=[item.to_dict() for item in snapshot.items])
+
+    def on_output(self, payload: dict[str, Any]) -> None:
+        # Spec §8.2 / §11 — `output.created`. Payload keys vary by kind:
+        # standalone -> {output_id, kind, title, download_url}
+        # kb_version -> {kind, kb_id, version, title, download_url}
+        self._emit("output.created", **payload)
 
     # --- waiting indicator -------------------------------------------- #
     def begin_wait(self, label: str = "Working") -> None:

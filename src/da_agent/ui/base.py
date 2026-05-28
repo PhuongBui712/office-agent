@@ -31,16 +31,30 @@ class AgentUI(Protocol):
     def on_thinking_delta(self, block_id: str, delta: str) -> None: ...
     def on_thinking_end(self, block_id: str) -> None: ...
     def on_tool_use(
-        self, name: str, tool_input: dict[str, Any], *, depth: int = 0
+        self,
+        name: str,
+        tool_input: dict[str, Any],
+        *,
+        depth: int = 0,
+        tool_use_id: str | None = None,
     ) -> None: ...
     def on_tool_result(
-        self, summary: str, *, is_error: bool = False, depth: int = 0
+        self,
+        summary: str,
+        *,
+        is_error: bool = False,
+        depth: int = 0,
+        tool_use_id: str | None = None,
     ) -> None: ...
     def on_system(self, subtype: str, data: dict[str, Any]) -> None: ...
     def on_result(
         self, *, turns: int, cost_usd: float | None, duration_s: float
     ) -> None: ...
     def on_error(self, message: str) -> None: ...
+
+    # ---- output registration (spec §8.2). Payload schema is the
+    # `output.created` SSE event from §11. ----
+    def on_output(self, payload: dict[str, Any]) -> None: ...
 
     # ---- todo list (snapshot pushed whenever the agent's task list changes) ----
     def on_todos(self, snapshot: TodoSnapshot) -> None: ...
