@@ -89,3 +89,20 @@ class AttachmentResponse(BaseModel):
 
 class AttachmentListResponse(BaseModel):
     attachments: list[AttachmentResponse]
+
+
+# --- Outputs (spec §8.2) --------------------------------------------- #
+class OutputResponse(BaseModel):
+    output_id: str
+    kind: Literal["standalone", "kb_version"]
+    title: str
+    filename: str
+    mime: str
+    size_bytes: int
+    source_session_id: str | None = None
+    source_kb_ids: list[str] = Field(default_factory=list)
+    created_at: float
+
+
+class OutputListResponse(BaseModel):
+    outputs: list[OutputResponse]
