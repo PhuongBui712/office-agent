@@ -76,3 +76,16 @@ class KbFileResponse(BaseModel):
 
 class KbFileListResponse(BaseModel):
     files: list[KbFileResponse]
+
+
+# --- Attachments (spec §5.3) ----------------------------------------- #
+class AttachmentResponse(BaseModel):
+    attachment_id: str
+    filename: str
+    size_bytes: int
+    mime: str
+    uploaded_at: float
+
+
+class AttachmentListResponse(BaseModel):
+    attachments: list[AttachmentResponse]
