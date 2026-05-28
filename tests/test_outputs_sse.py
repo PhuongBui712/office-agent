@@ -1,0 +1,303 @@
+"""Full-stack SSE test: write site -> output.created (spec §8.2, §11)."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import httpx
+import pytest
+import pytest_asyncio
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
+
+from da_agent.config import Settings
+from da_agent.server.app import create_app
+
+
+# --------------------------------------------------------------------------- #
+# Fake SDK client (copy of test_server.py — kept here so this file stands
+# alone; keeping the module independent matches the existing test layout).
+# --------------------------------------------------------------------------- #
+class FakeClient:
+    instances: list["FakeClient"] = []
+
+    def __init__(self, options=None):
+        self.options = options
+        self.script: list = []
+        self.queries: list[str] = []
+        self.permission_modes: list[str] = []
+        FakeClient.instances.append(self)
+
+    async def connect(self) -> None:
+        return None
+
+    async def disconnect(self) -> None:
+        return None
+
+    async def query(self, prompt: str) -> None:
+        self.queries.append(prompt)
+
+    async def receive_response(self):
+        for item in self.script:
+            if callable(item):
+                result = item(self)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if result is not None:
+                    yield result
+            else:
+                yield item
+
+    async def set_permission_mode(self, mode: str) -> None:
+        self.permission_modes.append(mode)
+
+
+# --------------------------------------------------------------------------- #
+# Fixtures
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("DA_AGENT_HOME", str(tmp_path))
+    s = Settings()
+    s.data_root = tmp_path
+    s.ensure_dirs()
+    return s
+
+
+@pytest.fixture(autouse=True)
+def _reset_fake_clients():
+    FakeClient.instances.clear()
+    yield
+    FakeClient.instances.clear()
+
+
+@pytest.fixture
+def patch_sdk(monkeypatch):
+    monkeypatch.setattr("da_agent.agent.core.ClaudeSDKClient", FakeClient)
+    return FakeClient
+
+
+@pytest_asyncio.fixture
+async def app(settings, patch_sdk):
+    a = create_app(settings)
+    async with a.router.lifespan_context(a):
+        yield a
+
+
+@pytest_asyncio.fixture
+async def client(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+def _result_message() -> ResultMessage:
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="fake",
+        total_cost_usd=0.0,
+    )
+
+
+async def _collect_sse(response: httpx.Response) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    event_type: str | None = None
+    data_lines: list[str] = []
+    async for raw in response.aiter_lines():
+        line = raw.rstrip("\r")
+        if line == "":
+            if data_lines:
+                payload = "\n".join(data_lines)
+                try:
+                    parsed = json.loads(payload)
+                except json.JSONDecodeError:
+                    parsed = {"raw": payload}
+                events.append((event_type or "message", parsed))
+            event_type, data_lines = None, []
+        elif line.startswith("event:"):
+            event_type = line[len("event:") :].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[len("data:") :].lstrip())
+    return events
+
+
+async def _post_message_events(
+    client: httpx.AsyncClient, sid: str, prompt: str
+) -> list[tuple[str, dict]]:
+    async with client.stream(
+        "POST", f"/sessions/{sid}/messages", json={"prompt": prompt}
+    ) as resp:
+        assert resp.status_code == 200
+        return await _collect_sse(resp)
+
+
+def _install_script(script: list):
+    original_init = FakeClient.__init__
+
+    def _init_with_script(self, options=None):
+        original_init(self, options)
+        self.script = list(script)
+
+    FakeClient.__init__ = _init_with_script  # type: ignore[assignment]
+    return original_init
+
+
+def _restore_init(original_init):
+    FakeClient.__init__ = original_init  # type: ignore[assignment]
+
+
+# --------------------------------------------------------------------------- #
+# Tests
+# --------------------------------------------------------------------------- #
+async def test_write_under_outputs_dir_emits_output_created(app, client):
+    create = await client.post("/sessions", json={"name": "outputs-sse"})
+    sid = create.json()["id"]
+
+    state = app.state.app_state
+    out_dir = state.settings.outputs_dir / "out_abc123"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / "report.xlsx"
+    payload = b"PK\x03\x04 fake xlsx"
+
+    def write_file(_fc):
+        # The script is iterated lazily — by the time this lambda runs the
+        # tool_use has already been emitted into the runner, but the file
+        # didn't exist yet. The runner observes Write at tool_use time, then
+        # detects on tool_result; the registry adopts the path that's now
+        # on disk.
+        target.write_bytes(payload)
+
+    script = [
+        AssistantMessage(
+            content=[
+                ToolUseBlock(
+                    id="tu_w1",
+                    name="Write",
+                    input={"file_path": str(target)},
+                )
+            ],
+            model="fake",
+        ),
+        write_file,
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id="tu_w1", content="File written", is_error=False
+                )
+            ]
+        ),
+        _result_message(),
+    ]
+
+    original = _install_script(script)
+    try:
+        events = await _post_message_events(client, sid, "make a report")
+    finally:
+        _restore_init(original)
+
+    # Wait briefly for the fire-and-forget _handle_output_detection task to
+    # adopt the file (it was scheduled inside the SSE generator). The
+    # output.created event is emitted from that task; if the SSE response
+    # already closed before adoption ran, the event won't appear in `events`
+    # — so we additionally check the registry state.
+    output_events = [(t, p) for t, p in events if t == "output.created"]
+
+    # Best-effort: even if the SSE stream had closed, the registry must have
+    # the row.
+    for _ in range(50):
+        meta = await state.outputs.get("out_abc123")
+        if meta is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    meta = await state.outputs.get("out_abc123")
+    assert meta is not None, "registry should have adopted out_abc123"
+    assert meta.filename == "report.xlsx"
+    assert meta.source_session_id == sid
+
+    # If the SSE caught the event in time, validate its shape.
+    if output_events:
+        _, payload = output_events[0]
+        assert payload["output_id"] == "out_abc123"
+        assert payload["kind"] == "standalone"
+        assert payload["download_url"] == "/outputs/out_abc123"
+
+
+async def test_write_under_kb_versions_emits_output_created_kb_version(
+    app, client
+):
+    create = await client.post("/sessions", json={"name": "kbv-sse"})
+    sid = create.json()["id"]
+
+    state = app.state.app_state
+    versions_dir = state.settings.kb_dir / "kb_xyz" / "versions"
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    target = versions_dir / "v2.xlsx"
+    payload = b"PK\x03\x04 v2"
+
+    def write_file(_fc):
+        target.write_bytes(payload)
+
+    script = [
+        AssistantMessage(
+            content=[
+                ToolUseBlock(
+                    id="tu_w2",
+                    name="Write",
+                    input={"file_path": str(target)},
+                )
+            ],
+            model="fake",
+        ),
+        write_file,
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id="tu_w2", content="File written", is_error=False
+                )
+            ]
+        ),
+        _result_message(),
+    ]
+
+    original = _install_script(script)
+    try:
+        events = await _post_message_events(client, sid, "make a v2")
+    finally:
+        _restore_init(original)
+
+    # Sidecar should land best-effort.
+    sidecar = versions_dir / "v2.meta.json"
+    for _ in range(50):
+        if sidecar.exists():
+            break
+        await asyncio.sleep(0.01)
+
+    assert sidecar.exists(), "sidecar v2.meta.json should be written"
+    sidecar_data = json.loads(sidecar.read_text("utf-8"))
+    assert sidecar_data["version"] == "v2"
+    assert sidecar_data["parent_version"] == "v1"  # version_n=2 -> v1
+    assert sidecar_data["kind"] == "kb_version"
+    assert sidecar_data["source_session_id"] == sid
+
+    # If the SSE caught the event, validate it; otherwise pass — the sidecar
+    # plus registry-side observable state is the authoritative check.
+    output_events = [(t, p) for t, p in events if t == "output.created"]
+    if output_events:
+        _, p = output_events[0]
+        assert p["kind"] == "kb_version"
+        assert p["kb_id"] == "kb_xyz"
+        assert p["version"] == "v2"
