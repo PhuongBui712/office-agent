@@ -8,9 +8,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import Settings
+from .routes import attachments as attachments_routes
 from .routes import interactions as interactions_routes
 from .routes import kb as kb_routes
 from .routes import messages as messages_routes
+from .routes import outputs as outputs_routes
 from .routes import sessions as sessions_routes
 from .state import AppState
 
@@ -24,6 +26,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state = AppState(settings)
         await state.registry.load()
         await state.kb.load()
+        await state.outputs.load()
         app.state.app_state = state
         try:
             yield
@@ -42,6 +45,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(messages_routes.router)
     app.include_router(interactions_routes.router)
     app.include_router(kb_routes.router)
+    app.include_router(attachments_routes.router)
+    app.include_router(outputs_routes.router)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict:

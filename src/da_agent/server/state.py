@@ -19,6 +19,8 @@ from typing import Any
 
 from ..config import Settings
 from ..kb import KbRegistry
+from ..outputs import OutputsRegistry
+from .attachments_registry import AttachmentsRegistry
 
 
 def _now() -> float:
@@ -248,6 +250,10 @@ class AppState:
         self.registry = SessionRegistry(settings.data_root / "registry.json")
         self.interactions = InteractionStore()
         self.kb = KbRegistry(settings.kb_dir / "registry.json")
+        self.attachments = AttachmentsRegistry(settings.attachments_dir)
+        # Spec §8.2 — standalone outputs registry. KB-bound outputs live in
+        # `kb/<kb_id>/versions/` sidecars (spec §7) and are NOT in here.
+        self.outputs = OutputsRegistry(settings.outputs_dir)
         self._runtimes: dict[str, SessionRuntime] = {}
         self._runtimes_lock = asyncio.Lock()
         # In-flight KB ingestion tasks. Cancelled on shutdown so the
@@ -283,6 +289,7 @@ class AppState:
         async with self._runtimes_lock:
             runtime = self._runtimes.pop(sid, None)
         await self.interactions.clear_session(sid)
+        await self.attachments.delete_session(sid)
         if runtime and runtime.runner is not None:
             try:
                 await runtime.runner.__aexit__(None, None, None)
