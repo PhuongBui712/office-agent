@@ -78,6 +78,21 @@ class KbFileListResponse(BaseModel):
     files: list[KbFileResponse]
 
 
+# --- KB versions (spec §7, §8.2) ------------------------------------- #
+class KbVersionResponse(BaseModel):
+    version: str                              # "v1", "v2", ...
+    parent_version: str                       # "raw" | "v<N-1>"
+    operation: Literal["add_sheet", "overwrite_sheet"] | None = None
+    sheet_affected: str | None = None
+    source_session_id: str | None = None
+    created_at: float
+    size_bytes: int
+
+
+class KbVersionListResponse(BaseModel):
+    versions: list[KbVersionResponse]
+
+
 # --- Attachments (spec §5.3) ----------------------------------------- #
 class AttachmentResponse(BaseModel):
     attachment_id: str

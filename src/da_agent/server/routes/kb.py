@@ -9,15 +9,17 @@ on subsequent GETs (FE polls; SSE for KB status is open question §14).
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from ...kb import read_manifest, run_pipeline
-from ..schemas import KbFileListResponse, KbFileResponse
+from ..schemas import KbFileListResponse, KbFileResponse, KbVersionListResponse, KbVersionResponse
 from ..state import AppState
 
 router = APIRouter(prefix="/kb", tags=["kb"])
@@ -165,3 +167,96 @@ async def delete_kb_file(kb_id: str, state: AppState = Depends(get_state)) -> No
     kb_dir = state.settings.kb_dir / kb_id
     if kb_dir.exists():
         await asyncio.to_thread(shutil.rmtree, str(kb_dir), True)
+
+
+# --------------------------------------------------------------------------- #
+# KB version endpoints (spec §7, §8.2, §11) — READ-ONLY.
+# Wave 3 (outputs.register observer) will create the version files; we only
+# scan and serve them here.
+# --------------------------------------------------------------------------- #
+_VERSION_RE = re.compile(r"^v(\d+)\.xlsx$")
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _scan_versions(versions_dir: Path) -> list[KbVersionResponse]:
+    """Scan kb/<id>/versions/ for v<N>.xlsx files.
+
+    For each, read companion v<N>.meta.json sidecar if present (spec §8.2).
+    If sidecar is missing, synthesize a stub: parent_version="raw" if N==1
+    else "v<N-1>", operation=None, source_session_id=None,
+    created_at=mtime, sheet_affected=None.
+    """
+    out: list[KbVersionResponse] = []
+    if not versions_dir.exists():
+        return out
+    for entry in sorted(versions_dir.iterdir()):
+        m = _VERSION_RE.match(entry.name)
+        if m is None or not entry.is_file():
+            continue
+        n = int(m.group(1))
+        sidecar = versions_dir / f"v{n}.meta.json"
+        meta: dict[str, Any] = {}
+        if sidecar.exists():
+            try:
+                meta = json.loads(sidecar.read_text("utf-8"))
+            except (json.JSONDecodeError, OSError):
+                meta = {}
+        out.append(KbVersionResponse(
+            version=f"v{n}",
+            parent_version=meta.get("parent_version", "raw" if n == 1 else f"v{n-1}"),
+            operation=meta.get("operation"),
+            sheet_affected=meta.get("sheet_affected"),
+            source_session_id=meta.get("source_session_id"),
+            created_at=float(meta.get("created_at", entry.stat().st_mtime)),
+            size_bytes=int(meta.get("size_bytes", entry.stat().st_size)),
+        ))
+    out.sort(key=lambda v: int(v.version[1:]))
+    return out
+
+
+@router.get("/files/{kb_id}/versions", response_model=KbVersionListResponse)
+async def list_kb_versions(
+    kb_id: str, state: AppState = Depends(get_state)
+) -> KbVersionListResponse:
+    meta = await state.kb.get(kb_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="kb file not found")
+    versions_dir = state.settings.kb_dir / kb_id / "versions"
+    versions = await asyncio.to_thread(_scan_versions, versions_dir)
+    return KbVersionListResponse(versions=versions)
+
+
+@router.get("/files/{kb_id}/versions/{version}/download")
+async def download_kb_version(
+    kb_id: str, version: str, state: AppState = Depends(get_state)
+) -> FileResponse:
+    meta = await state.kb.get(kb_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="kb file not found")
+    if not _VERSION_RE.match(f"{version}.xlsx"):
+        raise HTTPException(status_code=400, detail="invalid version format; expected v<N>")
+    file_path = state.settings.kb_dir / kb_id / "versions" / f"{version}.xlsx"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="version not found on disk")
+    return FileResponse(
+        path=file_path,
+        media_type=_XLSX_MIME,
+        filename=f"{kb_id}_{version}.xlsx",
+    )
+
+
+# --- Google Sheets import stub (spec §11, §14 open question) --------- #
+@router.post("/files/import-sheet", status_code=status.HTTP_501_NOT_IMPLEMENTED)
+async def import_sheet_stub() -> JSONResponse:
+    """Spec §14 open question — OAuth flow not yet defined.
+
+    Returning 501 here lets the FE see a deliberate `not implemented` rather
+    than a 404 for an endpoint that doesn't exist at all.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        content={
+            "error": "Google Sheets import not implemented",
+            "spec_reference": "technical-spec.md §14 open question (OAuth)",
+        },
+    )
