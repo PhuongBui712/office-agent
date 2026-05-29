@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 # --- Sessions --------------------------------------------------------- #
 class CreateSessionRequest(BaseModel):
-    name: str = "untitled"
+    name: str = "Untitled"
 
 
 class RenameSessionRequest(BaseModel):
@@ -32,9 +32,21 @@ class SessionListResponse(BaseModel):
     sessions: list[SessionResponse]
 
 
+class MessageHistoryResponse(BaseModel):
+    """Replay payload for `GET /sessions/{sid}/messages`.
+
+    Each entry is a wire-shape SSE event dict (same `type`/`session_id`/...
+    schema the live stream emits) so the FE can fold them through the
+    existing `streamReducer` to reconstruct the chat scrollback.
+    """
+
+    events: list[dict[str, Any]]
+
+
 # --- Messages --------------------------------------------------------- #
 class AttachmentRef(BaseModel):
     """Wire ref used in MessageRequest body (spec §8.5)."""
+
     attachment_id: str
 
 
@@ -44,6 +56,7 @@ class MessageRequest(BaseModel):
     `kb_scope=None`/missing → default-all READY KBs.
     `kb_scope=[]` → 400 (forces explicit per §8.5 validation table).
     """
+
     prompt: str = Field(min_length=1)
     kb_scope: list[str] | None = None
     attachments: list[AttachmentRef] = Field(default_factory=list)
@@ -92,8 +105,8 @@ class KbFileListResponse(BaseModel):
 
 # --- KB versions (spec §7, §8.2) ------------------------------------- #
 class KbVersionResponse(BaseModel):
-    version: str                              # "v1", "v2", ...
-    parent_version: str                       # "raw" | "v<N-1>"
+    version: str  # "v1", "v2", ...
+    parent_version: str  # "raw" | "v<N-1>"
     operation: Literal["add_sheet", "overwrite_sheet"] | None = None
     sheet_affected: str | None = None
     source_session_id: str | None = None

@@ -172,6 +172,13 @@ async def test_create_session_returns_201(client):
     assert body["parent_id"] is None
 
 
+async def test_create_session_default_name_is_capitalized(client):
+    """Empty body falls back to the schema default — 'Untitled' (capital U)."""
+    r = await client.post("/sessions", json={})
+    assert r.status_code == 201
+    assert r.json()["name"] == "Untitled"
+
+
 async def test_list_after_create_includes_session(client):
     create = await client.post("/sessions", json={"name": "beta"})
     sid = create.json()["id"]
