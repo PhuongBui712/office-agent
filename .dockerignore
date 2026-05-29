@@ -1,0 +1,22 @@
+# Keep the build context small and reproducible.
+.venv/
+.sdkvenv/
+data/
+.git/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+notebooks/
+tasks/
+tests/
+experiment/
+evaluate/
+demo/
+test-ui/
+.env
+.claude/settings.json
+.claude/settings.local.json

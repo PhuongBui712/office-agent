@@ -1,0 +1,39 @@
+# DA-Agent full stack: FastAPI backend (+ bundled claude CLI) and the static FE.
+#
+# Quick start:
+#   cp .env.docker.example .env   # then fill in your Databricks token
+#   docker compose up --build
+#
+# FE -> http://localhost:3000   BE -> http://localhost:8765
+#
+# Credentials are read from .env at runtime; nothing secret is baked into images.
+
+services:
+  backend:
+    build:
+      context: .
+      # Set to "1" to bundle LibreOffice for xlsx formula recalculation.
+      args:
+        INSTALL_LIBREOFFICE: "0"
+    env_file:
+      - .env
+    ports:
+      - "8765:8765"
+    volumes:
+      - da-agent-data:/data
+
+  frontend:
+    build:
+      context: ../da-agent-fe
+      args:
+        # Browser runs on the host, so it reaches the backend via the published
+        # port -- not the internal compose service name. Override for non-local
+        # deploys (see README "Run on another host").
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://127.0.0.1:8765}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  da-agent-data:
