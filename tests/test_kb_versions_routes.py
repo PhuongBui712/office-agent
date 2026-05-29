@@ -72,90 +72,103 @@ async def test_list_versions_no_versions_dir_returns_empty(client, app):
     assert r.json() == {"versions": []}
 
 
-async def test_list_versions_one_file_no_sidecar(client, app):
+async def test_list_versions_only_curr_no_sidecar(client, app):
+    """Spec §8.2 — 2-slot cap: a fresh write lands in `v_curr` only."""
     kb_id = await _register_kb(app)
     vdir = _versions_dir(app, kb_id)
     vdir.mkdir(parents=True)
-    v1 = vdir / "v1.xlsx"
-    v1.write_bytes(_FAKE_XLSX)
+    (vdir / "v_curr.xlsx").write_bytes(_FAKE_XLSX)
 
     r = await client.get(f"/kb/files/{kb_id}/versions")
     assert r.status_code == 200
     versions = r.json()["versions"]
     assert len(versions) == 1
     entry = versions[0]
-    assert entry["version"] == "v1"
-    assert entry["parent_version"] == "raw"   # N==1 → raw (no sidecar)
+    assert entry["version"] == "v_curr"
+    # No v_prev exists yet, so the default parent for v_curr stays the
+    # sidecar-supplied "v_prev" string (the response default for v_curr).
     assert entry["operation"] is None
     assert entry["size_bytes"] > 0
     assert entry["created_at"] > 0
 
 
-async def test_list_versions_sidecar_fields_take_precedence(client, app):
+async def test_list_versions_curr_and_prev_with_sidecars(client, app):
+    """After two writes the cap holds at 2: v_curr and v_prev side-by-side."""
     kb_id = await _register_kb(app)
     vdir = _versions_dir(app, kb_id)
     vdir.mkdir(parents=True)
 
-    # v1 — no sidecar
-    (vdir / "v1.xlsx").write_bytes(_FAKE_XLSX)
-
-    # v2 — full sidecar
-    (vdir / "v2.xlsx").write_bytes(_FAKE_XLSX)
+    # v_prev — older revision; no sidecar
+    (vdir / "v_prev.xlsx").write_bytes(_FAKE_XLSX)
+    # v_curr — latest revision; full sidecar
+    (vdir / "v_curr.xlsx").write_bytes(_FAKE_XLSX)
     sidecar = {
-        "parent_version": "v1",
+        "parent_version": "v_prev",
         "operation": "overwrite_sheet",
         "sheet_affected": "Sales",
         "source_session_id": "sess_x",
         "created_at": 1700000000.0,
         "size_bytes": 42,
     }
-    (vdir / "v2.meta.json").write_text(json.dumps(sidecar), encoding="utf-8")
+    (vdir / "v_curr.meta.json").write_text(json.dumps(sidecar), encoding="utf-8")
 
     r = await client.get(f"/kb/files/{kb_id}/versions")
     assert r.status_code == 200
     versions = r.json()["versions"]
     assert len(versions) == 2
 
-    v2 = next(v for v in versions if v["version"] == "v2")
-    assert v2["parent_version"] == "v1"
-    assert v2["operation"] == "overwrite_sheet"
-    assert v2["sheet_affected"] == "Sales"
-    assert v2["source_session_id"] == "sess_x"
-    assert v2["created_at"] == 1700000000.0
-    assert v2["size_bytes"] == 42
+    v_curr = next(v for v in versions if v["version"] == "v_curr")
+    assert v_curr["parent_version"] == "v_prev"
+    assert v_curr["operation"] == "overwrite_sheet"
+    assert v_curr["sheet_affected"] == "Sales"
+    assert v_curr["source_session_id"] == "sess_x"
+    assert v_curr["created_at"] == 1700000000.0
+    assert v_curr["size_bytes"] == 42
 
 
-async def test_download_version_returns_bytes(client, app):
+async def test_download_v_curr_returns_bytes(client, app):
     kb_id = await _register_kb(app)
     vdir = _versions_dir(app, kb_id)
     vdir.mkdir(parents=True)
     content = _FAKE_XLSX + b"extra_data"
-    (vdir / "v1.xlsx").write_bytes(content)
+    (vdir / "v_curr.xlsx").write_bytes(content)
 
-    r = await client.get(f"/kb/files/{kb_id}/versions/v1/download")
+    r = await client.get(f"/kb/files/{kb_id}/versions/v_curr/download")
     assert r.status_code == 200
     assert r.content == content
     assert "spreadsheetml" in r.headers["content-type"]
 
 
-async def test_download_version_missing_version_returns_404(client, app):
+async def test_download_v_prev_returns_bytes(client, app):
+    """Spec §8.2 — `v_prev` is the rollback slot; download must work too."""
     kb_id = await _register_kb(app)
-    # versions/ dir exists but v99.xlsx does not
+    vdir = _versions_dir(app, kb_id)
+    vdir.mkdir(parents=True)
+    content = _FAKE_XLSX + b"older_revision"
+    (vdir / "v_prev.xlsx").write_bytes(content)
+
+    r = await client.get(f"/kb/files/{kb_id}/versions/v_prev/download")
+    assert r.status_code == 200
+    assert r.content == content
+
+
+async def test_download_version_missing_slot_returns_404(client, app):
+    kb_id = await _register_kb(app)
     vdir = _versions_dir(app, kb_id)
     vdir.mkdir(parents=True)
 
-    r = await client.get(f"/kb/files/{kb_id}/versions/v99/download")
+    r = await client.get(f"/kb/files/{kb_id}/versions/v_curr/download")
     assert r.status_code == 404
 
 
 async def test_download_version_unknown_kb_returns_404(client):
-    r = await client.get("/kb/files/kb_nope/versions/v1/download")
+    r = await client.get("/kb/files/kb_nope/versions/v_curr/download")
     assert r.status_code == 404
 
 
 async def test_download_version_bogus_format_returns_400(client, app):
     kb_id = await _register_kb(app)
-    r = await client.get(f"/kb/files/{kb_id}/versions/xyz/download")
+    r = await client.get(f"/kb/files/{kb_id}/versions/v1/download")
     assert r.status_code == 400
 
 
