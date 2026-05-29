@@ -163,7 +163,7 @@ def test_taskcreate_then_update_updates_same_row_no_unknown():
         ("tu_c2", "2", "Clean and deduplicate records"),
         ("tu_c3", "3", "Build monthly revenue pivot table"),
         ("tu_c4", "4", "Generate revenue trend chart"),
-        ("tu_c5", "5", "Export final report to workspace"),
+        ("tu_c5", "5", "Export final report"),
     ]
     for use_id, task_id, subject in creates:
         store.observe_tool_use(use_id, "TaskCreate", {"subject": subject})
@@ -398,7 +398,7 @@ def test_runner_handles_real_sdk_create_then_update_no_unknown(runner):
         ("tu_c2", "2", "Clean and deduplicate records"),
         ("tu_c3", "3", "Build monthly revenue pivot table"),
         ("tu_c4", "4", "Generate revenue trend chart"),
-        ("tu_c5", "5", "Export final report to workspace"),
+        ("tu_c5", "5", "Export final report"),
     ]
     for use_id, task_id, subject in rows:
         r._absorb_todo_tool_use(

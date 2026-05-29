@@ -111,6 +111,15 @@ def test_options_assembly():
     assert set(opts.agents) == {"profiler", "analyst", "visualizer"}
     assert callable(opts.can_use_tool)
     assert opts.env["CLAUDE_CONFIG_DIR"].endswith("sessions")
+    # Spec §8.2 — system prompt is the SDK preset+append dict shape.
+    assert isinstance(opts.system_prompt, dict)
+    assert opts.system_prompt["type"] == "preset"
+    assert opts.system_prompt["preset"] == "claude_code"
+    assert "AskUserQuestion" in opts.system_prompt["append"]
+    # workspace was deprecated and must NOT leak into add_dirs nor the prompt.
+    add_dirs_str = " ".join(str(p) for p in opts.add_dirs)
+    assert "workspace" not in add_dirs_str
+    assert "workspace" not in opts.system_prompt["append"].lower()
 
 
 def test_render_blocks_and_filtering():
@@ -181,7 +190,7 @@ def _make_callbacks(qr: QuestionResponse | None = None, pd: PlanDecision | None 
 async def test_ask_user_question_routes_via_can_use_tool():
     qr = QuestionResponse(
         answers=[
-            Answer(header="Output", selected=["New .xlsx in workspace"]),
+            Answer(header="Output", selected=["New .xlsx"]),
             Answer(header="Format", selected=["CSV"], other_text="parquet"),
         ]
     )
@@ -194,7 +203,7 @@ async def test_ask_user_question_routes_via_can_use_tool():
                 "question": "Where should output go?",
                 "header": "Output",
                 "options": [
-                    {"label": "New .xlsx in workspace"},
+                    {"label": "New .xlsx"},
                     {"label": "Edit in place"},
                 ],
             },
@@ -210,7 +219,7 @@ async def test_ask_user_question_routes_via_can_use_tool():
     # Each question is round-tripped, with the user's answer indexed by its question text.
     assert result.updated_input["questions"] == tool_input["questions"]
     answers = result.updated_input["answers"]
-    assert answers["Where should output go?"] == "New .xlsx in workspace"
+    assert answers["Where should output go?"] == "New .xlsx"
     assert answers["Output format?"] == "CSV, parquet"
     assert len(state["questions_asked"]) == 1
 
