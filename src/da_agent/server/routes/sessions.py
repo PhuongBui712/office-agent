@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+
+from claude_agent_sdk import get_session_messages
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from ..replay import replay_to_events
 from ..schemas import (
     CreateSessionRequest,
     ForkSessionRequest,
+    MessageHistoryResponse,
     RenameSessionRequest,
     SessionListResponse,
     SessionResponse,
@@ -79,3 +84,27 @@ async def fork_session(
     name = body.name or f"{parent.name} (fork)"
     meta = await state.registry.create(name=name, parent_id=parent.id)
     return SessionResponse(**meta.to_dict())
+
+
+@router.get("/{sid}/messages", response_model=MessageHistoryResponse)
+async def get_session_history(
+    sid: str, state: AppState = Depends(get_state)
+) -> MessageHistoryResponse:
+    """Return the session's prior turns as SSE-shaped event dicts.
+
+    Empty `events` for fresh sessions (no SDK runner has connected yet).
+    Reads JSONL via `claude_agent_sdk.get_session_messages` -- offloaded
+    to a thread because it is sync filesystem I/O.
+    """
+    meta = await state.registry.get(sid)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if not meta.sdk_session_id:
+        return MessageHistoryResponse(events=[])
+    # `directory=None` lets the SDK scan every project dir under
+    # `CLAUDE_CONFIG_DIR/projects/`. Passing project_root would silently
+    # miss the JSONL on path-normalization mismatches (NFC, symlinks,
+    # worktrees). The single-user data root is small enough that the
+    # extra scan is free.
+    msgs = await asyncio.to_thread(get_session_messages, meta.sdk_session_id)
+    return MessageHistoryResponse(events=replay_to_events(msgs, sid))
