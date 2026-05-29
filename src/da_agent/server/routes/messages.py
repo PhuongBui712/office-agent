@@ -37,7 +37,24 @@ def get_state(request: Request) -> AppState:
 async def _ensure_runner(runtime: SessionRuntime, state: AppState) -> None:
     if runtime.runner is not None:
         return
-    ui = WebAgentUI(session_id=runtime.meta.id, app_state=state)
+    sid = runtime.meta.id
+
+    def on_sdk_session_id(sdk_uuid: str) -> None:
+        # Fire-and-forget capture from `SystemMessage(subtype="init")` —
+        # `WebAgentUI.on_system` runs in the runner task; we hop back to
+        # the async registry to persist. Idempotent inside the registry.
+        # add_done_callback retrieves any exception so it doesn't surface
+        # as a "Task exception was never retrieved" warning on shutdown.
+        task = asyncio.create_task(
+            state.registry.set_sdk_session_id(sid, sdk_uuid)
+        )
+        task.add_done_callback(
+            lambda t: t.exception() if not t.cancelled() else None
+        )
+
+    ui = WebAgentUI(
+        session_id=sid, app_state=state, on_sdk_session_id=on_sdk_session_id
+    )
 
     def on_output_detection(det: OutputDetection) -> None:
         # Bridge sync observer -> async registry + UI emission. Fire-and-forget;
@@ -48,7 +65,10 @@ async def _ensure_runner(runtime: SessionRuntime, state: AppState) -> None:
         )
 
     runner = AgentRunner(
-        ui, state.settings, on_output_detection=on_output_detection
+        ui,
+        state.settings,
+        on_output_detection=on_output_detection,
+        resume_sdk_session_id=runtime.meta.sdk_session_id,
     )
     await runner.__aenter__()
     runtime.ui = ui
@@ -100,15 +120,10 @@ async def _handle_output_detection(
         # backend can only infer parent_version from the version number.
         version_n = int(det.version[1:])
         sidecar_path = (
-            state.settings.kb_dir
-            / det.kb_id
-            / "versions"
-            / f"{det.version}.meta.json"
+            state.settings.kb_dir / det.kb_id / "versions" / f"{det.version}.meta.json"
         )
         try:
-            size = (
-                det.file_path.stat().st_size if det.file_path.exists() else 0
-            )
+            size = det.file_path.stat().st_size if det.file_path.exists() else 0
             sidecar_path.parent.mkdir(parents=True, exist_ok=True)
             sidecar_path.write_text(
                 json.dumps(
