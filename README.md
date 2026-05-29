@@ -96,8 +96,9 @@ Data lives under `~/.da-agent` (override with `DA_AGENT_HOME`):
 
 ```
 ~/.da-agent/
-├── kb/          # persistent spreadsheets (drop .xlsx here to use across sessions)
-├── workspace/   # agent writes generated files here (new .xlsx, charts)
+├── kb/          # persistent spreadsheets — manifest + raw + versions/v_curr.xlsx + v_prev.xlsx
+├── outputs/     # registered downloadable outputs (one folder per output_id)
+├── attachments/ # per-session uploads — original + versions/v_curr + v_prev
 └── sessions/    # SDK session JSONL (CLAUDE_CONFIG_DIR) — resumable, no DB
 ```
 

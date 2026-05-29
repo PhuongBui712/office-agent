@@ -108,10 +108,10 @@ flowchart LR
   - `find_project_root(start?) -> Path` — walk upward tìm dir chứa `.claude/`; fallback `<file>.parents[2]`. SDK cần `cwd` này để discover `.claude/skills/`.
   - `Settings` (dataclass slots):
     - Fields: `model`, `max_turns`, `plan_first`, `show_thinking`, `stream_responses`, `attachment_max_bytes` (100 MB), `scope_warn_bytes` (256 KB), `project_root`, `data_root`.
-    - Properties (derived): `kb_dir`, `workspace_dir`, `sessions_dir`, `outputs_dir`, `attachments_dir`, `skills_dir`.
+    - Properties (derived): `kb_dir`, `sessions_dir`, `outputs_dir`, `attachments_dir`, `skills_dir`. `workspace_dir` is retained as a deprecated property only — it is no longer in `add_dirs`, no longer created by `ensure_dirs`, and absent from the system prompt (spec §8.2 — all writes route through `outputs_dir` or `kb_dir/<id>/versions/` or `attachments_dir/<sid>/<att_id>/versions/`).
     - `ensure_dirs() -> None`.
 - **Điểm tinh tế**:
-  - Env: `CLAUDE_CONFIG_DIR=str(sessions_dir)` được set trong `AgentRunner._build_options()`, **không** trong `Settings` — `Settings` chỉ expose path.
+  - Env: `CLAUDE_CONFIG_DIR=str(sessions_dir)` được set trong `AgentRunner._build_options()`, **không** trong `Settings` — `Settings` chỉ expose path. Đồng thời FastAPI app lifespan (`server/app.py`) mirror cùng giá trị vào `os.environ` của parent process khi enter và restore khi exit, để `claude_agent_sdk.get_session_messages` (chạy trong parent process khi replay history) đọc đúng JSONL directory mà SDK subprocess ghi vào.
   - `data_root` default `~/.da-agent` (single-user local-first).
 
 ---
@@ -129,9 +129,10 @@ flowchart LR
 
 ### 3.2 `agent/prompts.py`
 
-- **Vai trò**: Tạo system prompt cho agent với hướng dẫn về layout filesystem (KB / workspace / outputs), workflow "manifest-first", và rule "NEVER modify `raw.xlsx` in place".
-- **Public API**: `build_system_prompt(settings: Settings) -> str`.
+- **Vai trò**: Tạo system prompt cho agent. Trả về dict `{"type": "preset", "preset": "claude_code", "append": <text>}` để layer custom instructions trên `claude_code` preset (SDK docs: *Modifying system prompts → Append to the `claude_code` preset*). Append text được structure bằng XML tags (`<role>`, `<environment>`, `<workflow>`, `<output_rules>`, `<trigger_rules>`, `<examples>`, `<output_discipline>`) theo Claude prompting best-practices — direct/imperative voice cho rules, worked examples cho fence cả 2 phía.
+- **Public API**: `build_system_prompt(settings: Settings) -> dict`.
 - **Tương tác**: chỉ được gọi bởi `AgentRunner._build_options()`.
+- **Layout filesystem được mô tả trong append**: `kb_dir/<kb_id>/{manifest.json, raw.xlsx, versions/v_curr.xlsx, versions/v_prev.xlsx}` cho KB, `attachments_dir/<sid>/<att_id>/{<filename>, versions/v_curr.<ext>, versions/v_prev.<ext>}` cho attachment. Không có "workspace" — đã deprecate (spec §8.2).
 
 ### 3.3 `agent/subagents.py`
 
@@ -197,10 +198,11 @@ sequenceDiagram
 
 - **Vai trò**: Engine trung tâm. Owns SDK session, dịch raw SDK message stream thành `AgentUI` calls. Không biết gì về `rich` hay `prompt_toolkit`.
 - **Public API**:
-  - `AgentRunner(ui, settings, *, on_output_detection?)`.
+  - `AgentRunner(ui, settings, *, on_output_detection?, resume_sdk_session_id=None)`.
   - `async __aenter__ / __aexit__` — connect/disconnect `ClaudeSDKClient`.
   - `async send(prompt, *, echo_prompt=True)` — chạy một conversational turn.
   - `async set_plan_mode()` — re-enter plan mode cho turn tiếp theo.
+- **Resume seam**: `_build_options()` set `ClaudeAgentOptions(resume=self._resume_sdk_session_id)`. Khi non-None, SDK reuse JSONL transcript hiện có thay vì mint session mới; route layer truyền giá trị này từ `SessionMeta.sdk_session_id` để giữ liên tục transcript qua nhiều lần connect.
 
 #### Sequence: `AgentRunner.send()`
 
@@ -445,7 +447,8 @@ sequenceDiagram
 
 - **Vai trò**: Tạo `FastAPI`, mount routers, setup CORS, điều phối lifespan.
 - **Public API**: `create_app(settings: Settings | None) -> FastAPI`.
-- **Lifespan**: `AppState(settings)` → `await registry.load()` → `await kb.load()` (sweep PROCESSING → FAILED) → `await outputs.load()` → gắn vào `app.state.app_state`. On shutdown: `await state.shutdown()` cancel KB tasks + discard runtimes.
+- **Lifespan**: trên enter — set `os.environ["CLAUDE_CONFIG_DIR"] = str(settings.sessions_dir)` (lưu giá trị cũ để restore) rồi `AppState(settings)` → `await registry.load()` → `await kb.load()` (sweep PROCESSING → FAILED) → `await outputs.load()` → gắn vào `app.state.app_state`. On shutdown: `await state.shutdown()` cancel KB tasks + discard runtimes; sau đó restore `CLAUDE_CONFIG_DIR` về giá trị cũ (hoặc `pop` nếu trước đó không có).
+- **Lý do mirror env**: `claude_agent_sdk.get_session_messages` (dùng cho history replay) chạy trong parent FastAPI process và đọc `CLAUDE_CONFIG_DIR` từ `os.environ` — nếu không mirror, nó sẽ tìm trong `~/.claude/projects/` thay vì `settings.sessions_dir/projects/` nơi SDK subprocess thực sự ghi JSONL.
 - **CORS**: `http://127.0.0.1:3000` + `http://localhost:3000`, methods/headers `*`, `allow_credentials=False`.
 - **Routers**: `sessions`, `messages`, `interactions`, `attachments` (cùng prefix `/sessions`); `kb`, `outputs`. Inline `GET /health`.
 
@@ -453,7 +456,7 @@ sequenceDiagram
 
 | Thành phần | Vai trò |
 |---|---|
-| `SessionMeta` / `SessionRegistry` | Dataclass + JSON registry trên disk; atomic-rename write; `asyncio.Lock`. Corrupt JSON khi `load()` → reset `_items.clear()` (không crash). |
+| `SessionMeta` / `SessionRegistry` | Dataclass + JSON registry trên disk; atomic-rename write; `asyncio.Lock`. Corrupt JSON khi `load()` → reset `_items.clear()` (không crash). `SessionMeta` có thêm field `sdk_session_id: str \| None = None` — UUID do SDK mint, captured từ `SystemMessage(subtype="init")` của turn đầu; persist qua `to_dict`/`from_dict` và registry cũ load với `None` (backward-compat). Method `set_sdk_session_id(sid, uuid) -> bool` idempotent: trả `False` mà không flush nếu giá trị unchanged, ngược lại update + atomic flush qua `_flush_locked` hiện có (`.tmp` + `os.replace`). |
 | `PendingInteraction` / `InteractionStore` | `dict[sid, dict[tool_use_id, PendingInteraction]]`. `resolve` pop **trước** khi `set_result` (tránh race với re-park cùng id). |
 | `TurnStream` | Per-turn `asyncio.Queue` unbounded; sentinel-closed; `emit` sau `_closed=True` là no-op (safe trong exception handler). |
 | `SessionRuntime` | Lazy `runner` + `ui` + `lock: asyncio.Lock` — serialize turns trong cùng session. |
@@ -467,7 +470,7 @@ sequenceDiagram
 
 | Group | Models |
 |---|---|
-| Sessions | `CreateSessionRequest`, `RenameSessionRequest`, `ForkSessionRequest`, `SessionResponse`, `SessionListResponse`. |
+| Sessions | `CreateSessionRequest` (default `name="Untitled"`), `RenameSessionRequest`, `ForkSessionRequest`, `SessionResponse`, `SessionListResponse`, `MessageHistoryResponse(events: list[dict[str, Any]])` (replay payload cho `GET /sessions/{sid}/messages`, mỗi entry là wire-shape SSE event dict). |
 | Messages | `MessageRequest(prompt, kb_scope?, attachments=[])`, `AttachmentRef(attachment_id)`. |
 | Interactions | `AnswerSubmission`, `QuestionResponseSubmission`, `PlanResponseSubmission(verdict: Literal["approve","reject"])`, `PendingInteractionResponse`, `PendingInteractionsListResponse`. |
 | KB | `KbFileResponse(status: Literal[...])`, `KbFileListResponse`, `KbVersionResponse`, `KbVersionListResponse`. |
@@ -519,9 +522,10 @@ Short-term attachments (no manifest, read directly with xlsx skill):
 ### 7.7 `server/web_ui.py` — `WebAgentUI`
 
 - **Vai trò**: Implement `AgentUI` Protocol bằng cách push events vào `TurnStream` (sync, fire-and-forget) và park `asyncio.Future` cho async interactions.
-- **Public API**: `WebAgentUI(*, session_id, app_state)`; `attach(stream)` / `detach()` / `_emit(type, **data)`.
+- **Public API**: `WebAgentUI(*, session_id, app_state, on_sdk_session_id: Callable[[str], None] | None = None)`; `attach(stream)` / `detach()` / `_emit(type, **data)`.
 - **Latch `_text_delta_seen`**: lần đầu có text delta trong turn → emit `wait.end` ngay trước `assistant.text.delta`. Latch reset trong cả `attach()` và `detach()` — per-turn scoped.
 - **Server-minted tool_use_id**: dùng prefix `int_<12hex>` cho parked interactions, **không phải** SDK `toolu_…`. FE round-trip ID này mà thôi.
+- **`on_system(subtype, data)` capture**: khi `subtype == "init"` và `data["session_id"]` là non-empty string, gọi `on_sdk_session_id(sdk_uuid)` **trước** khi emit SSE `system` event — để route layer kịp persist UUID vào `SessionMeta` cho lần resume kế tiếp.
 - `ask_question`/`approve_plan`: park `PendingInteraction(future)`, emit `interaction.requested`, `await future`. Khi `CancelledError` (session bị xóa): trả empty `QuestionResponse(answers=[])` hoặc `PlanDecision(REJECT, "cancelled")`.
 
 ### 7.8 `server/routes/` — Endpoint table
@@ -536,6 +540,7 @@ Short-term attachments (no manifest, read directly with xlsx skill):
 | DELETE | `/sessions/{sid}` | 204 / 404 | sessions.py | gọi `discard_runtime(sid)` |
 | POST | `/sessions/{sid}/fork` | 201 / 404 | sessions.py | tạo child với `parent_id` |
 | POST | `/sessions/{sid}/messages` | 200 SSE / 400 / 404 | messages.py | StreamingResponse `text/event-stream` |
+| GET | `/sessions/{sid}/messages` | 200 / 404 | sessions.py | `MessageHistoryResponse(events: list[dict])`. Empty events nếu `sdk_session_id is None`. Đọc JSONL qua `claude_agent_sdk.get_session_messages(uuid)` (`directory=None` để scan mọi project dir) → `replay_to_events`. |
 | GET | `/sessions/{sid}/interactions/pending` | 200 / 404 | interactions.py | |
 | POST | `/sessions/{sid}/interactions/{tool_use_id}/respond` | 204 / 404 / 409 | interactions.py | 409 nếu đã resolved |
 | POST | `/sessions/{sid}/attachments` | 201 / 400 / 404 / 413 | attachments.py | multipart |
@@ -553,6 +558,19 @@ Short-term attachments (no manifest, read directly with xlsx skill):
 | GET | `/outputs/{output_id}/meta` | 200 / 404 | outputs.py | |
 | GET | `/outputs/{output_id}` | 200 / 404 | outputs.py | FileResponse download |
 | DELETE | `/outputs/{output_id}` | 204 / 404 | outputs.py | |
+
+### 7.9 `server/replay.py` — Session-history replay
+
+- **Vai trò**: Dịch SDK historical messages (đọc qua `claude_agent_sdk.get_session_messages`) thành wire-format SSE event dicts để FE fold replay qua chính `streamReducer` của live stream — không cần code path riêng.
+- **Public API**: `replay_to_events(messages: list[SessionMessage], sid: str) -> list[dict[str, Any]]`. Trả `[]` khi `messages` rỗng.
+- **`_INTERACTIVE_TOOLS = {"AskUserQuestion", "ExitPlanMode"} | TODO_TOOL_NAMES`**: tool_use blocks với name nằm trong set này bị filter ra (mirror suppression của live runner — UI surface dedicated render chúng, không phải ordinary tool steps).
+- **Block mapping**:
+  - `assistant.text` ← `TextBlock` (skip whitespace-only)
+  - `assistant.thinking` ← `ThinkingBlock` (skip whitespace-only)
+  - `tool.use` ← `ToolUseBlock` (filtered bởi `_INTERACTIVE_TOOLS`)
+  - `tool.result` ← `ToolResultBlock` embedded trong user role
+  - `user.prompt` ← user role với str content
+- **Synthetic `result` events**: insert giữa các user-prompt boundary và một lần ở cuối — để FE reducer flip `inToolChain=false` và mark thinking blocks `done` (mirror live `ResultMessage` boundary). Payload `{turns, cost_usd: None, duration_s: 0.0}` vì historical run không lưu cost/duration.
 
 ---
 
@@ -615,6 +633,10 @@ sequenceDiagram
         Route->>Runtime: release lock
     end
 ```
+
+**Chi tiết `_ensure_runner` (session-history wiring)**:
+- Route layer build closure `on_sdk_session_id(sdk_uuid)` → schedule `state.registry.set_sdk_session_id(sid, sdk_uuid)` qua `asyncio.create_task` (vì callback chạy sync trong runner task, phải hop về async registry). Task được `add_done_callback(lambda t: t.exception())` để swallow exception, tránh "Task exception was never retrieved" warning lúc shutdown.
+- `WebAgentUI` được khởi tạo với kwarg `on_sdk_session_id=on_sdk_session_id`; `AgentRunner` được khởi tạo thêm kwarg `resume_sdk_session_id=runtime.meta.sdk_session_id` — nếu meta đã có UUID từ phiên trước, `ClaudeAgentOptions(resume=...)` sẽ resume cùng JSONL transcript thay vì mint session mới.
 
 ### 8.2 Inventory các SSE event được emit
 
