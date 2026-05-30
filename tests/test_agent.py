@@ -120,6 +120,22 @@ def test_options_assembly():
     add_dirs_str = " ".join(str(p) for p in opts.add_dirs)
     assert "workspace" not in add_dirs_str
     assert "workspace" not in opts.system_prompt["append"].lower()
+    # Layer-1 sandbox + deny rules.
+    assert opts.sandbox is not None
+    assert opts.sandbox["enabled"] is True
+    assert opts.sandbox["allowUnsandboxedCommands"] is False
+    assert opts.disallowed_tools == ["WebFetch", "WebSearch"]
+    # `settings` is a JSON blob the SDK consumes — verify it carries the
+    # deny rules surface, not just an empty object.
+    import json as _json
+
+    parsed_settings = _json.loads(opts.settings)
+    deny_rules = parsed_settings["permissions"]["deny"]
+    assert any("raw.xlsx" in r for r in deny_rules)
+    assert any("sessions/**" in r for r in deny_rules)
+    # Layer-2 PreToolUse hook for Bash.
+    assert "PreToolUse" in opts.hooks
+    assert any(m.matcher == "Bash" for m in opts.hooks["PreToolUse"])
 
 
 def test_render_blocks_and_filtering():

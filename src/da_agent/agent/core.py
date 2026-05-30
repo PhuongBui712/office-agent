@@ -32,6 +32,11 @@ from ..ui.base import AgentUI
 from .events import PlanDecision, QuestionRequest, QuestionResponse
 from .permissions import ResolveTarget, make_can_use_tool
 from .prompts import build_system_prompt
+from .security import (
+    build_permission_settings_json,
+    build_sandbox_settings,
+    build_security_hooks,
+)
 from .subagents import build_subagents
 from .todos import TodoStore, TODO_TOOL_NAMES
 
@@ -138,6 +143,7 @@ class AgentRunner:
             system_prompt=build_system_prompt(s),
             agents=build_subagents(),
             allowed_tools=_BASE_TOOLS,
+            disallowed_tools=["WebFetch", "WebSearch"],
             can_use_tool=can_use_tool,
             permission_mode="plan" if s.plan_first else "default",
             model=s.model,
@@ -150,6 +156,11 @@ class AgentRunner:
             env=env,
             include_partial_messages=s.stream_responses,
             resume=self._resume_sdk_session_id,
+            # Layer-1: SDK sandbox + declarative deny rules.
+            sandbox=build_sandbox_settings(),
+            settings=build_permission_settings_json(s),
+            # Layer-2: PreToolUse hook for Python-via-Bash escape patterns.
+            hooks=build_security_hooks(),
         )
 
     # ------------------------------------------------------------------ #
