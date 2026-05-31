@@ -1,11 +1,17 @@
 """OutputsObserver — parallel to `TodoStore` (spec §8.2, §8.4).
 
 Watches Write/Edit/Bash tool calls; on tool_result without error, classifies
-the input.file_path or Bash command for paths under one of three layouts:
+the input.file_path or Bash command for paths under the session-scoped
+outputs layout (Phase C 2026-05-31):
 
-  outputs/<out_id>/<filename>                       -> standalone
-  kb/<kb_id>/versions/v_(curr|prev).<ext>           -> kb_version
-  attachments/<sid>/<att_id>/versions/v_(curr|prev) -> attachment_version
+  outputs/<session_id>/<out_id>/<filename>          -> standalone
+
+DEPRECATED 2026-05-31 (Golden Rule 4 broken per user approval): the
+`kb_version` and `attachment_version` branches no longer fire — KB-bound and
+attachment-bound writes are now routed through the standalone layout via
+`resolved_target_path`. The detection branches remain in code so tests can
+assert they return None and to keep the dataclass shape stable for any
+downstream consumer.
 
 Emits a detection through `on_detect`; the runner bridges that into the
 async registry + UI.
@@ -32,11 +38,10 @@ _WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
 
 @dataclass(slots=True)
 class OutputDetection:
-    """One of three kinds (spec §8.2):
+    """One of three kinds (spec §8.2).
 
-    - `standalone`         (`outputs/<out_id>/<filename>`)
-    - `kb_version`         (`kb/<kb_id>/versions/v_(curr|prev).<ext>`)
-    - `attachment_version` (`attachments/<sid>/<att_id>/versions/v_(curr|prev).<ext>`)
+    Phase C 2026-05-31: only `standalone` is emitted in practice. The other
+    two literals are retained for type stability.
     """
 
     kind: Literal["standalone", "kb_version", "attachment_version"]
@@ -58,11 +63,16 @@ class OutputsObserver:
     def __init__(
         self,
         outputs_dir: Path,
+        session_id: str,
         kb_dir: Path,
         attachments_dir: Path,
         on_detect: Callable[[OutputDetection], None],
     ) -> None:
         self._outputs_dir = outputs_dir.resolve()
+        self._session_id = session_id
+        # Cache the resolved per-session root so `_classify` can match it
+        # without rebuilding the path on every tool call.
+        self._session_outputs_dir = (outputs_dir / session_id).resolve()
         self._kb_dir = kb_dir.resolve()
         self._attachments_dir = attachments_dir.resolve()
         self._on_detect = on_detect
@@ -117,12 +127,21 @@ class OutputsObserver:
 
     def _classify(self, path: Path) -> OutputDetection | None:
         try:
-            resolved = path if path.is_absolute() else (self._outputs_dir / path)
+            # Relative paths resolve against the per-session outputs dir so
+            # the agent can pass either absolute or relative `file_path`.
+            resolved = (
+                path
+                if path.is_absolute()
+                else (self._session_outputs_dir / path)
+            )
             resolved = resolved.resolve(strict=False)
         except OSError:
             return None
-        if _is_under(resolved, self._outputs_dir):
-            rel = resolved.relative_to(self._outputs_dir)
+        # Standalone branch (Phase C): require `outputs/<session_id>/<out_*>/<filename>`.
+        # Reject paths under another session's dir or under outputs/ without
+        # a session prefix.
+        if _is_under(resolved, self._session_outputs_dir):
+            rel = resolved.relative_to(self._session_outputs_dir)
             parts = rel.parts
             if len(parts) >= 2 and parts[0].startswith("out_"):
                 return OutputDetection(
@@ -132,41 +151,14 @@ class OutputsObserver:
                     filename="/".join(parts[1:]),
                 )
             return None
+        # DEPRECATED 2026-05-31: Golden Rule 4 broken per user approval.
+        # KB writes now redirect to outputs/<sid>/<out_id>/. The branch is
+        # kept for symmetry / regression assertions but never emits.
         if _is_under(resolved, self._kb_dir):
-            rel = resolved.relative_to(self._kb_dir)
-            parts = rel.parts
-            if (
-                len(parts) == 3
-                and parts[0].startswith("kb_")
-                and parts[1] == "versions"
-                and _VERSION_FILE_RE.match(parts[2])
-            ):
-                slot = parts[2].split(".", 1)[0]  # "v_curr" or "v_prev"
-                return OutputDetection(
-                    kind="kb_version",
-                    file_path=resolved,
-                    kb_id=parts[0],
-                    version=slot,
-                )
             return None
+        # DEPRECATED 2026-05-31: same as above for attachment-bound writes.
         if _is_under(resolved, self._attachments_dir):
-            rel = resolved.relative_to(self._attachments_dir)
-            parts = rel.parts
-            # attachments/<sid>/<att_id>/versions/v_(curr|prev).<ext>
-            if (
-                len(parts) == 4
-                and parts[2] == "versions"
-                and parts[1].startswith("att_")
-                and _VERSION_FILE_RE.match(parts[3])
-            ):
-                slot = parts[3].split(".", 1)[0]
-                return OutputDetection(
-                    kind="attachment_version",
-                    file_path=resolved,
-                    session_id=parts[0],
-                    attachment_id=parts[1],
-                    version=slot,
-                )
+            return None
         return None
 
 
