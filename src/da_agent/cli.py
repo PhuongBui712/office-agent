@@ -132,6 +132,14 @@ async def run_demo(settings: Settings) -> None:
                             "A standalone file you can download",
                         ),
                         Option(
+                            "New .pptx",
+                            "A standalone PowerPoint deck you can download",
+                        ),
+                        Option(
+                            "New .docx",
+                            "A standalone Word document you can download",
+                        ),
+                        Option(
                             "New sheet", "Append a new sheet to the source workbook"
                         ),
                         Option(
