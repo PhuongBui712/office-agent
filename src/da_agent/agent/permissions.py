@@ -140,8 +140,29 @@ async def _handle_ask_user_question(
         if resolution is not None:
             updated_input["resolved_target_path"] = resolution.resolved_target_path
             updated_input["resolved_target_kind"] = resolution.resolved_target_kind
+            # SDK does not forward extra updated_input keys to the tool result;
+            # the agent only sees `{questions, answers}`. Encode the resolved
+            # path into the Target answer string itself so the model reads it
+            # back from tool_result without guessing.
+            target_q_text = _find_target_question_text(raw_questions)
+            if target_q_text and target_q_text in answers:
+                answers[target_q_text] = (
+                    f"{answers[target_q_text]} → write final file to "
+                    f"{resolution.resolved_target_path}"
+                )
 
     return PermissionResultAllow(updated_input=updated_input)
+
+
+def _find_target_question_text(raw_questions: list[dict[str, Any]]) -> str | None:
+    """Return the `question` text of the first question whose header is 'Target'.
+
+    Falls back to the first question's text if no Target header found.
+    """
+    for q in raw_questions:
+        if (q.get("header") or "").strip().lower() == "target":
+            return q.get("question")
+    return raw_questions[0].get("question") if raw_questions else None
 
 
 def _is_output_target_question(raw_questions: list[dict[str, Any]]) -> bool:
