@@ -65,6 +65,11 @@ async def rename_session(
 async def delete_session(sid: str, state: AppState = Depends(get_state)) -> None:
     if not await state.registry.delete(sid):
         raise HTTPException(status_code=404, detail="session not found")
+    # Phase C 2026-05-31 — wipe the session's outputs subtree and registry
+    # rows BEFORE discarding the runtime (which already cleans up
+    # attachments). Best-effort: errors inside `delete_session_outputs`
+    # don't block runtime cleanup.
+    await state.outputs.delete_session_outputs(sid)
     await state.discard_runtime(sid)
 
 
