@@ -76,3 +76,11 @@ async def respond_interaction(
 
     if not await state.interactions.resolve(sid, tool_use_id, value):
         raise HTTPException(status_code=409, detail="interaction was already resolved")
+
+    # Tell the live SSE stream the parked entry is gone so the FE reducer can
+    # pop it from `pendingInteractions[]`. Without this signal the reducer
+    # accumulates stale entries and the head of the queue never advances to a
+    # second AskUserQuestion within the same turn (FE bug-report 2026-05-31).
+    runtime = await state.get_or_create_runtime(sid)
+    if runtime is not None and runtime.ui is not None:
+        runtime.ui.emit_interaction_resolved(tool_use_id, target.kind)

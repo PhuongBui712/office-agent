@@ -502,6 +502,185 @@ async def test_interaction_requested_and_respond_resolves(app, client):
     assert requested["kind"] == "question"
     assert requested["questions"][0]["header"] == "H"
 
+    # Bug-fix 2026-05-31: respond must emit `interaction.resolved` so the FE
+    # reducer can pop the entry from `pendingInteractions[]`. Without it a
+    # second AskUserQuestion in the same turn never becomes the head of the
+    # queue and the modal is stuck on the stale tool_use_id.
+    resolved = [payload for t, payload in events if t == "interaction.resolved"]
+    assert len(resolved) == 1
+    assert resolved[0]["tool_use_id"] == requested["tool_use_id"]
+    assert resolved[0]["kind"] == "question"
+
+
+async def test_two_sequential_ask_questions_in_single_turn(app, client):
+    """Regression for the 2026-05-31 bug: agent calls AskUserQuestion twice in
+    the same turn. Both `interaction.requested` events MUST appear with
+    distinct `tool_use_id`s, both /respond calls MUST resolve their own future,
+    and both `interaction.resolved` events MUST appear (in order) so the FE
+    reducer can drop the first entry before the second arrives.
+    """
+    create = await client.post("/sessions", json={"name": "double-ask"})
+    sid = create.json()["id"]
+
+    from da_agent.agent.events import Option, Question, QuestionRequest
+
+    captured_responses: list[Any] = []
+
+    async def driver(fc: FakeClient):
+        runtime = await app.state.app_state.get_or_create_runtime(sid)
+        assert runtime is not None and runtime.ui is not None
+
+        async def _ask(label: str) -> Any:
+            request = QuestionRequest(
+                questions=[
+                    Question(
+                        question=f"q-{label}",
+                        header=f"H-{label}",
+                        options=[Option(label="opt-A", description="")],
+                    )
+                ]
+            )
+            ask_task = asyncio.create_task(runtime.ui.ask_question(request))
+            for _ in range(50):
+                pending = await app.state.app_state.interactions.pending(sid)
+                # Pick the entry that hasn't been resolved yet.
+                if any(p.kind == "question" for p in pending):
+                    break
+                await asyncio.sleep(0.01)
+            assert pending, f"interaction {label} was never parked"
+            tu_id = pending[0].tool_use_id
+
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as inner:
+                r = await inner.post(
+                    f"/sessions/{sid}/interactions/{tu_id}/respond",
+                    json={
+                        "answers": [
+                            {
+                                "header": f"H-{label}",
+                                "selected": ["opt-A"],
+                                "other_text": None,
+                            }
+                        ]
+                    },
+                )
+                assert r.status_code == 204
+            return await asyncio.wait_for(ask_task, timeout=1.0), tu_id
+
+        # Two AskUserQuestion calls back-to-back inside the same turn.
+        r1, tu1 = await _ask("one")
+        r2, tu2 = await _ask("two")
+        assert tu1 != tu2
+        captured_responses.append((tu1, tu2, r1, r2))
+        return None
+
+    def install_script(fc: FakeClient):
+        fc.script = [driver, _result_message()]
+
+    original_init = FakeClient.__init__
+
+    def _init_with_script(self, options=None):
+        original_init(self, options)
+        install_script(self)
+
+    FakeClient.__init__ = _init_with_script  # type: ignore[assignment]
+    try:
+        events = await _post_message_events(client, sid, "ask me twice")
+    finally:
+        FakeClient.__init__ = original_init  # type: ignore[assignment]
+
+    # Both questions must have surfaced, in order, with distinct ids.
+    requested = [p for t, p in events if t == "interaction.requested"]
+    assert len(requested) == 2, f"expected 2 interaction.requested, got {len(requested)}"
+    assert requested[0]["tool_use_id"] != requested[1]["tool_use_id"]
+    assert requested[0]["questions"][0]["header"] == "H-one"
+    assert requested[1]["questions"][0]["header"] == "H-two"
+
+    # Both resolved events must follow, in matching order.
+    resolved = [p for t, p in events if t == "interaction.resolved"]
+    assert len(resolved) == 2, f"expected 2 interaction.resolved, got {len(resolved)}"
+    assert resolved[0]["tool_use_id"] == requested[0]["tool_use_id"]
+    assert resolved[1]["tool_use_id"] == requested[1]["tool_use_id"]
+    assert all(r["kind"] == "question" for r in resolved)
+
+    # The order on the wire matters: requested-1, resolved-1, requested-2, resolved-2.
+    interaction_kinds = [
+        t for t, _ in events if t in {"interaction.requested", "interaction.resolved"}
+    ]
+    assert interaction_kinds == [
+        "interaction.requested",
+        "interaction.resolved",
+        "interaction.requested",
+        "interaction.resolved",
+    ]
+
+    # The two ask_question coroutines returned the right user answers.
+    assert len(captured_responses) == 1
+    _, _, r1, r2 = captured_responses[0]
+    assert r1.answers and r1.answers[0].selected == ["opt-A"]
+    assert r2.answers and r2.answers[0].selected == ["opt-A"]
+
+
+async def test_respond_emits_interaction_resolved_for_plan(app, client):
+    """The same bridge fires for plan-kind interactions."""
+    from da_agent.agent.events import PlanDecision
+
+    create = await client.post("/sessions", json={"name": "plan-resolve"})
+    sid = create.json()["id"]
+
+    captured: list[PlanDecision] = []
+
+    async def driver(fc: FakeClient):
+        runtime = await app.state.app_state.get_or_create_runtime(sid)
+        assert runtime is not None and runtime.ui is not None
+        approve_task = asyncio.create_task(runtime.ui.approve_plan("- step 1"))
+
+        for _ in range(50):
+            pending = await app.state.app_state.interactions.pending(sid)
+            if pending:
+                break
+            await asyncio.sleep(0.01)
+        assert pending, "plan interaction was never parked"
+        tu_id = pending[0].tool_use_id
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as inner:
+            r = await inner.post(
+                f"/sessions/{sid}/interactions/{tu_id}/respond",
+                json={"verdict": "approve"},
+            )
+            assert r.status_code == 204
+        decision = await asyncio.wait_for(approve_task, timeout=1.0)
+        captured.append(decision)
+        return None
+
+    def install_script(fc: FakeClient):
+        fc.script = [driver, _result_message()]
+
+    original_init = FakeClient.__init__
+
+    def _init_with_script(self, options=None):
+        original_init(self, options)
+        install_script(self)
+
+    FakeClient.__init__ = _init_with_script  # type: ignore[assignment]
+    try:
+        events = await _post_message_events(client, sid, "plan-please")
+    finally:
+        FakeClient.__init__ = original_init  # type: ignore[assignment]
+
+    requested = [p for t, p in events if t == "interaction.requested"]
+    resolved = [p for t, p in events if t == "interaction.resolved"]
+    assert len(requested) == 1 and requested[0]["kind"] == "plan"
+    assert len(resolved) == 1
+    assert resolved[0]["kind"] == "plan"
+    assert resolved[0]["tool_use_id"] == requested[0]["tool_use_id"]
+    assert captured and captured[0].verdict.value == "approve"
+
 
 # --------------------------------------------------------------------------- #
 # E. Streaming SSE (spec §8.6)

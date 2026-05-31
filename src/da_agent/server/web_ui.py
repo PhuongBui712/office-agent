@@ -9,8 +9,20 @@ resolves the future when the frontend submits.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from typing import Any, Callable
+
+_logger = logging.getLogger(__name__)
+
+# Events the FE relies on for correctness (modal lifecycle, error reporting).
+# Dropping these silently masks bugs — log a warning whenever the stream is not
+# attached at emit time. Streaming text/thinking deltas are intentionally NOT
+# in this set: they fire at high frequency and are tolerable to drop on edge
+# cases like late-arriving deltas after detach().
+_CRITICAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {"interaction.requested", "interaction.resolved", "error", "result"}
+)
 
 from ..agent.events import (
     Answer,
@@ -62,8 +74,22 @@ class WebAgentUI:
     def _emit(self, type_: str, **data: Any) -> None:
         stream = self._stream
         if stream is None:
+            if type_ in _CRITICAL_EVENT_TYPES:
+                _logger.warning(
+                    "WebAgentUI[%s] dropped critical event %r — no stream attached",
+                    self.session_id,
+                    type_,
+                )
             return
         stream.emit({"type": type_, "session_id": self.session_id, **data})
+
+    def emit_interaction_resolved(self, tool_use_id: str, kind: str) -> None:
+        """Public bridge for the route layer to announce that a parked
+        interaction has been resolved by the user. The reducer pops the
+        entry from `pendingInteractions[]` so a later `interaction.requested`
+        with a fresh `tool_use_id` is the head of the queue.
+        """
+        self._emit("interaction.resolved", tool_use_id=tool_use_id, kind=kind)
 
     # --- streaming render --------------------------------------------- #
     def on_user_prompt(self, text: str) -> None:
