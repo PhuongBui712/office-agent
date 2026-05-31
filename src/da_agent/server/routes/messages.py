@@ -110,7 +110,12 @@ async def _resolve_output_target(
     kb_metas = await state.kb.list()
     att_metas = await state.attachments.list(sid)
 
-    if target == "New .xlsx":
+    _STANDALONE_DEFAULTS = {
+        "New .xlsx": "output.xlsx",
+        "New .pptx": "output.pptx",
+        "New .docx": "output.docx",
+    }
+    if target in _STANDALONE_DEFAULTS:
         # Source is N/A (or any answer). Mint a new output_id and a default
         # filename. The model picks the actual filename when it writes; we
         # simply give it a sandboxed directory.
@@ -118,7 +123,7 @@ async def _resolve_output_target(
         out_dir = state.settings.outputs_dir / output_id
         out_dir.mkdir(parents=True, exist_ok=True)
         # Default filename mirrors the spec example.
-        filename = "output.xlsx"
+        filename = _STANDALONE_DEFAULTS[target]
         return TargetResolution(
             resolved_target_path=str(out_dir / filename),
             resolved_target_kind="standalone",
@@ -159,7 +164,7 @@ async def _resolve_output_target(
         )
 
     raise TargetValidationError(
-        f"Target must be one of 'New .xlsx', 'New sheet', 'Pick sheet'; got '{target}'"
+        f"Target must be one of 'New .xlsx', 'New .pptx', 'New .docx', 'New sheet', 'Pick sheet'; got '{target}'"
     )
 
 
