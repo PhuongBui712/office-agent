@@ -12,10 +12,8 @@ Per-message lifecycle:
 from __future__ import annotations
 
 import asyncio
-import json
 import mimetypes
 import secrets
-import time
 from pathlib import Path
 from typing import Any
 
@@ -49,29 +47,6 @@ def _suffix_for(filename: str) -> str:
     return ext or ".xlsx"
 
 
-def _rotate_versions_dir(versions_dir: Path, new_ext: str) -> None:
-    """Spec §8.2 — pre-write rotation: `v_curr.* → v_prev.*` (cap at 2).
-
-    Run BEFORE the model writes its new `v_curr.<ext>`. Drops any existing
-    `v_prev.*` (regardless of extension) to keep the cap, then renames the
-    current `v_curr.*` to `v_prev.<that ext>`. Sidecars (`<slot>.meta.json`)
-    follow the same rotation so listings stay coherent.
-    """
-    if not versions_dir.exists():
-        versions_dir.mkdir(parents=True, exist_ok=True)
-        return
-    # Drop ANY v_prev (even foreign extensions) — the new rotation will land
-    # the current v_curr's extension.
-    for entry in list(versions_dir.iterdir()):
-        if entry.name.startswith("v_prev."):
-            entry.unlink(missing_ok=True)
-    # Rotate any v_curr.* -> v_prev.<same ext>; same for the meta sidecar.
-    for entry in list(versions_dir.iterdir()):
-        if entry.name.startswith("v_curr.") and entry.is_file():
-            ext = entry.name.split(".", 1)[1]
-            entry.rename(versions_dir / f"v_prev.{ext}")
-
-
 def _intersection_kb_options(
     kb_metas: list[Any], kb_scope: list[str] | None
 ) -> list[str]:
@@ -92,9 +67,15 @@ async def _resolve_output_target(
 ) -> TargetResolution:
     """Spec §8.2 — validate (Target, Source) and resolve absolute write path.
 
-    Performs pre-write rotation (`v_curr → v_prev`) for KB/attachment writes
-    so the next observer-detected write lands in a freshly-cleared `v_curr`
-    slot. Raises `TargetValidationError` on any validation failure (the
+    Phase C 2026-05-31: ALL targets land under
+    `outputs/<session_id>/<output_id>/<filename>`. The legacy `versions/`
+    chain in `kb/<kb_id>/` and `attachments/<sid>/<att_id>/` is no longer
+    written to (Golden Rule 4 broken per user approval). `resolved_target_kind`
+    still reports `kb_version` / `attachment_version` for KB/attachment
+    targets so the agent's mental model stays intact, but the path lands
+    under outputs.
+
+    Raises `TargetValidationError` on any validation failure (the
     permission gate maps it to `PermissionResultDeny`).
     """
     if len(raw_answers) < 2:
@@ -115,14 +96,14 @@ async def _resolve_output_target(
         "New .pptx": "output.pptx",
         "New .docx": "output.docx",
     }
+    session_root = state.settings.outputs_session_dir(sid)
     if target in _STANDALONE_DEFAULTS:
         # Source is N/A (or any answer). Mint a new output_id and a default
         # filename. The model picks the actual filename when it writes; we
         # simply give it a sandboxed directory.
         output_id = _new_output_id()
-        out_dir = state.settings.outputs_dir / output_id
+        out_dir = session_root / output_id
         out_dir.mkdir(parents=True, exist_ok=True)
-        # Default filename mirrors the spec example.
         filename = _STANDALONE_DEFAULTS[target]
         return TargetResolution(
             resolved_target_path=str(out_dir / filename),
@@ -130,8 +111,8 @@ async def _resolve_output_target(
         )
 
     if target in {"New sheet", "Pick sheet"}:
-        # Source must point at a KB or attachment. We accept both
-        # `kb_<id>` / `kb_<id>::<sheet>` and `att_<id>` / `att_<id>::<sheet>`.
+        # Source must point at a KB or attachment; we still validate the
+        # reference even though the write lands under outputs/<sid>/.
         if not source or source == "N/A":
             raise TargetValidationError(f"Source is required when Target = '{target}'")
         head = source.split("::", 1)[0]
@@ -141,22 +122,27 @@ async def _resolve_output_target(
             if head not in allowed:
                 raise TargetValidationError(f"unknown or non-READY kb_id: {head}")
             meta = next(m for m in kb_metas if m.id == head)
-            ext = _suffix_for(meta.filename)
-            versions_dir = state.settings.kb_dir / head / "versions"
-            _rotate_versions_dir(versions_dir, ext)
+            output_id = _new_output_id()
+            out_dir = session_root / output_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+            # Preserve the source filename so the user recognises the
+            # deliverable in the outputs view (`Sales.xlsx` rather than
+            # `v_curr.xlsx`).
+            filename = meta.filename or f"output{_suffix_for(meta.filename)}"
             return TargetResolution(
-                resolved_target_path=str(versions_dir / f"v_curr{ext}"),
+                resolved_target_path=str(out_dir / filename),
                 resolved_target_kind="kb_version",
             )
         if head.startswith("att_"):
             att = next((a for a in att_metas if a.id == head), None)
             if att is None:
                 raise TargetValidationError(f"unknown attachment_id: {head}")
-            ext = _suffix_for(att.filename)
-            versions_dir = state.settings.attachments_dir / sid / head / "versions"
-            _rotate_versions_dir(versions_dir, ext)
+            output_id = _new_output_id()
+            out_dir = session_root / output_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+            filename = att.filename or f"output{_suffix_for(att.filename)}"
             return TargetResolution(
-                resolved_target_path=str(versions_dir / f"v_curr{ext}"),
+                resolved_target_path=str(out_dir / filename),
                 resolved_target_kind="attachment_version",
             )
         raise TargetValidationError(
@@ -166,41 +152,6 @@ async def _resolve_output_target(
     raise TargetValidationError(
         f"Target must be one of 'New .xlsx', 'New .pptx', 'New .docx', 'New sheet', 'Pick sheet'; got '{target}'"
     )
-
-
-def _write_version_sidecar(
-    *,
-    versions_dir: Path,
-    version: str,
-    kind: str,
-    file_path: Path,
-    source_session_id: str | None,
-) -> None:
-    """Best-effort sidecar `versions/<version>.meta.json` (spec §8.2)."""
-    sidecar_path = versions_dir / f"{version}.meta.json"
-    try:
-        size = file_path.stat().st_size if file_path.exists() else 0
-        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-        sidecar_path.write_text(
-            json.dumps(
-                {
-                    "version": version,
-                    "parent_version": "v_prev" if version == "v_curr" else None,
-                    "kind": kind,
-                    "operation": None,
-                    "sheet_affected": None,
-                    "source_session_id": source_session_id,
-                    "created_at": time.time(),
-                    "size_bytes": size,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-    except OSError:
-        # Sidecar is best-effort — the version file itself is the source of
-        # truth (spec §7).
-        pass
 
 
 async def _ensure_runner(runtime: SessionRuntime, state: AppState) -> None:
@@ -234,8 +185,8 @@ async def _ensure_runner(runtime: SessionRuntime, state: AppState) -> None:
         raw_answers: list[dict[str, Any]],
     ) -> TargetResolution:
         # Spec §8.2 — invoked from `permissions.py` after the FE answer
-        # arrives. Validates the (Target, Source) pair, rotates v_curr→v_prev
-        # for KB/attachment writes, and returns the resolved absolute path.
+        # arrives. Phase C 2026-05-31: routes ALL targets under
+        # `outputs/<sid>/<output_id>/<filename>`.
         return await _resolve_output_target(
             raw_questions=raw_questions,
             raw_answers=raw_answers,
@@ -246,6 +197,7 @@ async def _ensure_runner(runtime: SessionRuntime, state: AppState) -> None:
     runner = AgentRunner(
         ui,
         state.settings,
+        session_id=sid,
         on_output_detection=on_output_detection,
         resume_sdk_session_id=runtime.meta.sdk_session_id,
         resolve_target=resolve_target,
@@ -264,14 +216,11 @@ async def _handle_output_detection(
 ) -> None:
     """Spec §8.2 — register the detected file and emit `output.created`.
 
-    - `standalone`: adopt `outputs/<output_id>/<filename>`; sidecar `meta.json`
-      and registry row land.
-    - `kb_version` / `attachment_version`: rotate the previous `v_curr` to
-      `v_prev` (deleting any older `v_prev`), write a sidecar `v_curr.meta.json`,
-      then emit. Only `v_curr` is the freshly-written file; the model never
-      writes directly to `v_prev` — the observer rejects mismatched slots
-      (`v_prev` won't reach this branch in practice, but we still emit a
-      best-effort SSE so downstream listeners see it).
+    Phase C 2026-05-31: only `standalone` detections fire (the observer no
+    longer emits `kb_version` / `attachment_version` — see
+    `outputs/observer.py`). All deliverables, including those originally
+    requested as KB-bound or attachment-bound, land under
+    `outputs/<session_id>/<output_id>/<filename>` and adopt cleanly.
     """
     sid = runtime.meta.id
     if det.kind == "standalone" and det.output_id and det.filename:
@@ -281,6 +230,7 @@ async def _handle_output_detection(
         mime, _ = mimetypes.guess_type(filename)
         meta = await state.outputs.adopt_at(
             output_id=det.output_id,
+            session_id=sid,
             title=filename,
             filename=filename,
             mime=mime or "application/octet-stream",
@@ -294,62 +244,6 @@ async def _handle_output_detection(
                 "kind": "standalone",
                 "title": meta.title,
                 "download_url": f"/outputs/{meta.id}",
-            }
-        )
-        return
-
-    if det.kind == "kb_version" and det.kb_id and det.version:
-        versions_dir = state.settings.kb_dir / det.kb_id / "versions"
-        _write_version_sidecar(
-            versions_dir=versions_dir,
-            version=det.version,
-            kind="kb_version",
-            file_path=det.file_path,
-            source_session_id=sid,
-        )
-        ui.on_output(
-            {
-                "kind": "kb_version",
-                "kb_id": det.kb_id,
-                "version": det.version,
-                "title": f"{det.kb_id} {det.version}",
-                "download_url": (
-                    f"/kb/files/{det.kb_id}/versions/{det.version}/download"
-                ),
-            }
-        )
-        return
-
-    if (
-        det.kind == "attachment_version"
-        and det.session_id
-        and det.attachment_id
-        and det.version
-    ):
-        versions_dir = (
-            state.settings.attachments_dir
-            / det.session_id
-            / det.attachment_id
-            / "versions"
-        )
-        _write_version_sidecar(
-            versions_dir=versions_dir,
-            version=det.version,
-            kind="attachment_version",
-            file_path=det.file_path,
-            source_session_id=sid,
-        )
-        ui.on_output(
-            {
-                "kind": "attachment_version",
-                "session_id": det.session_id,
-                "attachment_id": det.attachment_id,
-                "version": det.version,
-                "title": f"{det.attachment_id} {det.version}",
-                "download_url": (
-                    f"/sessions/{det.session_id}/attachments/{det.attachment_id}"
-                    f"/versions/{det.version}/download"
-                ),
             }
         )
 
