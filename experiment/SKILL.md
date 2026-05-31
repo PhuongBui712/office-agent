@@ -19,28 +19,29 @@ description: >
 ## Overview
 
 This skill defines a strict, phased process for professional data analysis. It transforms
-a vague analytical question into actionable insights and recommendations. The agent's job is
-not to produce charts — it is to produce decisions.
+a vague analytical question into actionable insights and recommendations delivered as a
+formal document. The agent's job is not to produce charts — it is to produce decisions.
 
-**Agent stack:** Claude Agent SDK
-**Input format:** Excel files only (.xlsx / .xls), which may contain multiple sheets.
+**Output format:** A PowerPoint presentation (`.pptx`) and/or a Word document (`.docx`).
+No other deliverable format is produced. The specific format(s) are confirmed in Phase 1.
 
 ---
 
 ## When NOT to Use This Skill
 
-Recognize these patterns and handle them directly without invoking the full DA process:
+Recognize these patterns and handle them directly WITHOUT invoking the full DA process:
 
 | User request pattern             | What to do instead                          |
 |----------------------------------|---------------------------------------------|
 | "What's the total of column X?"  | Read the file, compute, answer.             |
-| "Filter rows where Y > 100"     | Read the file, filter, return result.       |
-| "Merge Sheet1 and Sheet2 on ID" | Read the file, merge, return result.        |
-| "Create a pivot table of Z"     | Read the file, pivot, return result.        |
-| "Convert this to CSV"           | Read the file, convert, return result.      |
-| "Show me the first 10 rows"     | Read the file, display, done.              |
+| "Filter rows where Y > 100"      | Read the file, filter, return result.       |
+| "Merge Sheet1 and Sheet2 on ID"  | Read the file, merge, return result.        |
+| "Create a pivot table of Z"      | Read the file, pivot, return result.        |
+| "Convert this to CSV"            | Read the file, convert, return result.      |
+| "Show me the first 10 rows"      | Read the file, display, done.               |
 
-These are data extraction or manipulation tasks — not analysis.
+These are data extraction or manipulation tasks — not analysis. Answer them directly and
+do NOT enter the phased process, do NOT call `AskUserQuestion`, do NOT call `EnterPlanMode`.
 
 ---
 
@@ -55,69 +56,80 @@ Phase 2: Data Understanding
 Phase 3: Data Cleaning & Preparation
 Phase 4: Analysis & Hypothesis Testing
 Phase 5: Synthesis & Recommendations
-Phase 6: Delivery
+Phase 6: Delivery (.pptx and/or .docx)
 ```
 
 After completing Phase 1, ALWAYS call `EnterPlanMode` to produce a detailed execution
-plan before proceeding. The plan must map to Phases 2–6 with concrete steps.
+plan before proceeding. The plan must strictly follow Phases 2–6 with concrete steps.
 
 ---
 
 ## Phase 1 — Business Understanding
 
-**Objective:** Fully define the problem before touching the data seriously.
+**Objective:** Fully define the problem and the deliverable before touching the data seriously.
 
 ### Step 1.1 — Quick Data Exploration
 
 Before asking the user anything, do a fast scan of the uploaded Excel file(s):
 
-- List all sheet names
-- For each sheet: row count, column names, dtypes, first 5 rows
-- Note obvious data characteristics (date ranges, categorical fields, numeric fields)
+- List all sheet names.
+- For each sheet: row count, column names, dtypes, first 5 rows.
+- Note obvious data characteristics (date ranges, categorical fields, numeric fields).
 
-This gives you context to ask smarter questions in the next step.
+This gives you context to ask smarter, data-grounded questions in the next step.
+Keep this exploration lightweight — it is for orientation, not analysis.
 
-### Step 1.2 — Ensure the Problem Is Fully Defined
+### Step 1.2 — Ensure the Problem Is Fully Defined (+ Confirm Output)
 
-You must have clear answers for these three items before moving forward:
+You MUST have clear answers for these **three** items before moving forward:
 
 1. **Business Question** — What specific question are we answering?
 2. **KPIs / Metrics** — Which metrics matter for this question?
 3. **Dimensions / Segments** — Along which axes should we slice the data?
 
-**If the user's request does not clearly define all three, call `AskUserQuestion`.**
+You must ALSO have a confirmed **output format**:
 
-Frame your questions based on what you learned in Step 1.1. Reference actual columns,
-sheets, and data ranges you found — don't ask generic questions.
+4. **Output format** — `.pptx`, `.docx`, or both.
 
-Examples of good `AskUserQuestion` usage:
+**If the user's request does not clearly define all three problem items, OR has not
+clearly declared the output format, call `AskUserQuestion`.** Resolve everything in a
+single `AskUserQuestion` call where possible — do not ask one item at a time.
+
+Frame your questions using what you learned in Step 1.1. Reference actual columns,
+sheets, and data ranges you found — never ask generic questions.
+
+Example `AskUserQuestion` usage:
 
 ```
-I see the file has columns: revenue, cost, region, channel, date.
+I scanned the file — it has one sheet with columns: revenue, cost, region, channel, date
+(spanning Jan–Jun 2024). Before I analyze, I need to confirm a few things:
 
-To analyze this properly, I need to clarify:
-1. Are we focused on revenue, profit (revenue - cost), or both?
-2. Should I break this down by region, channel, or both?
-3. What time period matters most — the full dataset (Jan–Jun 2024) or a specific range?
+1. Focus metric — revenue, profit (revenue − cost), or both?
+2. Breakdown — by region, channel, or both?
+3. Time window — full range (Jan–Jun 2024) or a specific period?
+4. Deliverable — should I produce a PowerPoint (.pptx), a Word report (.docx), or both?
 ```
 
-Do NOT ask about things you can infer from the data. If there's a "date" column spanning
-Jan–Dec 2024, don't ask "what time range?" unless the user hinted at a specific window.
+Do NOT ask about things you can infer from the data. If a `date` column clearly spans
+Jan–Dec 2024 and the user gave no hint of a sub-window, don't ask "what time range?".
+But output format is NEVER inferable — always confirm it if the user didn't state it.
 
-### Step 1.3 — Formulate Hypotheses
+### Step 1.3 — Formulate Hypotheses (Agent-Generated)
 
-Once the problem is defined, generate **exactly 2–3 hypotheses** — no more.
+Once the problem is defined, YOU (the agent) generate the hypotheses — do not ask the
+user for them. Generate **at most 3** — the most important and impactful for the problem.
+Fewer is fine if only one or two are genuinely worth testing.
 
-Selection criteria for hypotheses:
-- **Impact**: Would confirming this hypothesis explain a large portion of the observed problem?
-- **Testability**: Can you actually test it with the available data?
-- **Actionability**: If true, does it lead to a concrete recommendation?
+Selection criteria:
+- **Impact** — Would confirming this explain a large portion of the observed problem?
+- **Testability** — Can you actually test it with the available data?
+- **Actionability** — If true, does it lead to a concrete recommendation?
 
 Format:
 
 ```
-H1: [Most likely / highest impact hypothesis]
-H2: [Second most likely hypothesis]
+H1: [Highest-impact / most likely hypothesis]
+H2: [Second hypothesis]
 H3: [Alternative / contrarian hypothesis]  (optional — only if genuinely valuable)
 ```
 
@@ -127,20 +139,22 @@ Example:
 Business question: "Why did revenue drop 15% in May?"
 
 H1: The drop is concentrated in the Southeast region due to a pricing change on May 3rd.
-H2: Paid ad spend decreased in May, reducing traffic volume across all regions.
-H3: A product stockout in the top-selling SKU caused the revenue gap.
+H2: Paid ad spend decreased in May, reducing traffic across all regions.
+H3: A stockout in the top-selling SKU created the revenue gap.
 ```
 
 ### Step 1.4 — Call `EnterPlanMode`
 
-After completing Steps 1.1–1.3, ALWAYS call `EnterPlanMode`.
+After completing Steps 1.1–1.3, ALWAYS call `EnterPlanMode` to produce a detailed,
+high-success-rate plan. The plan MUST strictly follow the process (Phases 2–6) and:
 
-The plan must:
-- Reference the specific business question, KPIs, dimensions, and hypotheses from Phase 1
-- Map every subsequent step to Phases 2–6
-- Be concrete — name actual columns, sheets, and transformations
-- Estimate which hypothesis each analysis step is testing
-- Include validation checkpoints (e.g., "reconcile metric X before proceeding")
+- Reference the specific business question, KPIs, dimensions, hypotheses, and the
+  confirmed output format(s) from Phase 1.
+- Map every subsequent step to Phases 2–6.
+- Be concrete — name actual columns, sheets, and transformations.
+- State which hypothesis each analysis step tests.
+- Include validation checkpoints (e.g., "reconcile metric X before proceeding").
+- End with the Phase 6 deliverable as the confirmed `.pptx` and/or `.docx`.
 
 Plan template:
 
@@ -152,34 +166,33 @@ Plan template:
 - KPIs: [from Step 1.2]
 - Dimensions: [from Step 1.2]
 - Hypotheses: [from Step 1.3]
+- Deliverable: [.pptx / .docx / both — from Step 1.2]
 
 ### Phase 2 — Data Understanding
 - [ ] Profile each sheet: nulls, duplicates, outliers, distributions
-- [ ] Identify grain of each table (1 row = 1 what?)
+- [ ] Identify grain of each sheet (1 row = 1 what?)
 - [ ] Validate key metrics against any known benchmarks
-- [ ] Map relationships between sheets (join keys, foreign keys)
+- [ ] Map relationships between sheets (join keys)
 
 ### Phase 3 — Data Cleaning & Preparation
 - [ ] Handle missing values in [specific columns]
 - [ ] Remove duplicates using [specific logic]
-- [ ] Standardize [dates/currencies/categories] as needed
+- [ ] Standardize [dates/currencies/categories]
 - [ ] Build analysis-ready dataset by joining [Sheet X] with [Sheet Y] on [key]
 
 ### Phase 4 — Analysis & Hypothesis Testing
-- [ ] H1: [specific analysis steps — e.g., segment revenue by region + time]
+- [ ] H1: [specific analysis steps]
 - [ ] H2: [specific analysis steps]
 - [ ] H3: [specific analysis steps, if applicable]
 - [ ] Additional exploratory analysis if hypotheses are inconclusive
 
 ### Phase 5 — Synthesis & Recommendations
-- [ ] Summarize which hypotheses were confirmed/rejected and why
-- [ ] Quantify the impact of each confirmed root cause
+- [ ] Summarize confirmed/rejected hypotheses and why
+- [ ] Quantify impact of each confirmed root cause
 - [ ] Formulate 2–4 specific, actionable recommendations
 
 ### Phase 6 — Delivery
-- [ ] Write Executive Summary
-- [ ] Prepare supporting visualizations
-- [ ] Document methodology and assumptions
+- [ ] Generate [.pptx and/or .docx] following the structure in Phase 6
 ```
 
 Do NOT proceed to Phase 2 until the plan is finalized.
@@ -193,14 +206,14 @@ Do NOT proceed to Phase 2 until the plan is finalized.
 ### Checklist
 
 1. **Schema exploration** — For every sheet: column names, types, sample values, enums.
-2. **Data profiling** — For every column: null rate, duplicate rate, unique count, min/max,
-   distribution shape (for numerics), top categories (for categoricals).
-3. **Grain identification** — Define what one row represents in each sheet. This is critical.
+2. **Data profiling** — Per column: null rate, duplicate rate, unique count, min/max,
+   distribution shape (numerics), top categories (categoricals).
+3. **Grain identification** — Define what one row represents in each sheet. Critical.
    Wrong grain = wrong analysis. Document it explicitly.
-4. **Cross-sheet relationships** — Identify join keys. Verify they're actually unique where
-   expected (e.g., if `order_id` should be unique in the orders sheet, confirm it).
-5. **Metric validation** — If the user mentioned any known numbers ("revenue was $2M last month"),
-   check whether your data reproduces them. Flag discrepancies immediately.
+4. **Cross-sheet relationships** — Identify join keys. Verify uniqueness where expected
+   (e.g., confirm `order_id` is actually unique in the orders sheet).
+5. **Metric validation** — If the user mentioned known numbers ("revenue was $2M last
+   month"), check whether your data reproduces them. Flag discrepancies immediately.
 
 ---
 
@@ -210,23 +223,15 @@ Do NOT proceed to Phase 2 until the plan is finalized.
 
 ### Checklist
 
-1. **Handle missing values**
-   - Decide per column: drop, impute (mean/median/mode/forward-fill), or flag.
-   - Document every decision and its reasoning.
-
-2. **Remove duplicates**
-   - Use appropriate dedup logic (exact match vs. fuzzy, which columns define uniqueness).
-   - Log how many rows were removed.
-
-3. **Standardize**
-   - Dates: consistent format and timezone.
-   - Currency: single unit.
-   - Categories: merge synonyms (e.g., "NY" / "New York" / "new york").
-
-4. **Build the analytical dataset**
-   - Join sheets as needed.
-   - Create derived columns (e.g., profit = revenue − cost, cohort = signup month).
-   - Verify row counts after every join — unexpected row inflation means a grain mismatch.
+1. **Handle missing values** — Decide per column: drop, impute, or flag. Document each
+   decision and its reasoning.
+2. **Remove duplicates** — Use appropriate dedup logic (which columns define uniqueness).
+   Log how many rows were removed.
+3. **Standardize** — Dates (format + timezone), currency (single unit), categories
+   (merge synonyms like "NY" / "New York").
+4. **Build the analytical dataset** — Join sheets as needed; create derived columns
+   (profit = revenue − cost, cohort = signup month). Verify row counts after every join —
+   unexpected inflation signals a grain mismatch.
 
 ---
 
@@ -236,29 +241,31 @@ Do NOT proceed to Phase 2 until the plan is finalized.
 
 ### For each hypothesis:
 
-1. **State the hypothesis clearly** — what you expect to find.
+1. **State it clearly** — what you expect to find.
 2. **Define the test** — what analysis would confirm or reject it.
-3. **Execute the analysis** — segment, compare, compute.
+3. **Execute** — segment, compare, compute.
 4. **State the result** — confirmed, rejected, or inconclusive, with evidence.
 
-### Analysis techniques (use as appropriate):
+### Techniques (use as appropriate):
 
-| Technique            | When to use                                      |
-|----------------------|--------------------------------------------------|
-| Segment comparison   | Compare metric across groups (region, cohort)     |
-| Trend analysis       | Identify changes over time                        |
-| Funnel analysis      | Find drop-off points in a process                 |
-| Cohort analysis      | Compare behavior of groups defined by time         |
-| Correlation analysis | Test relationships between variables              |
-| Contribution analysis| Decompose a metric change into its components     |
-| Outlier detection    | Identify anomalous data points skewing results    |
+| Technique             | When to use                                      |
+|-----------------------|--------------------------------------------------|
+| Segment comparison    | Compare a metric across groups (region, cohort)  |
+| Trend analysis        | Identify changes over time                       |
+| Funnel analysis       | Find drop-off points in a process                |
+| Cohort analysis       | Compare groups defined by time                   |
+| Correlation analysis  | Test relationships between variables             |
+| Contribution analysis | Decompose a metric change into its components    |
+| Outlier detection     | Identify anomalies skewing results               |
 
 ### Rules:
 
 - Always compare against a baseline (prior period, benchmark, control group).
-- Always check if a pattern is statistically meaningful vs. noise.
-- If all hypotheses are rejected, do not force a narrative. State that the initial
-  hypotheses were inconclusive and identify new directions from what you learned.
+- Distinguish a real pattern from noise; for experiments, mind sample size, peeking,
+  and multiple comparisons.
+- Correlation ≠ causation. When you can't randomize, be explicit about confounders.
+- If all hypotheses are rejected, do not force a narrative. Say so and identify new
+  directions from what you learned.
 
 ---
 
@@ -266,26 +273,30 @@ Do NOT proceed to Phase 2 until the plan is finalized.
 
 **Objective:** Turn findings into decisions.
 
-### Structure:
-
 1. **Root cause summary** — Which hypotheses were confirmed? What was the primary driver?
-   Quantify impact (e.g., "Region Southeast accounts for 60% of the revenue decline").
-
-2. **Recommendations** — 2–4 specific, actionable next steps. Each recommendation must:
-   - Tie directly to a finding
-   - Be specific enough to act on ("Pause Campaign X" not "Improve marketing")
-   - Include expected impact if possible
-
-3. **Risks and caveats** — What assumptions were made? What data limitations exist?
-   What could invalidate the conclusions?
+   Quantify impact ("Southeast accounts for 60% of the revenue decline").
+2. **Recommendations** — 2–4 specific, actionable next steps. Each must tie to a finding,
+   be concrete ("Pause Campaign X", not "Improve marketing"), and include expected impact
+   where possible.
+3. **Risks and caveats** — Assumptions made, data limitations, what could invalidate the
+   conclusions.
 
 ---
 
 ## Phase 6 — Delivery
 
-**Objective:** Communicate results clearly to stakeholders.
+**Objective:** Communicate results clearly as a formal deliverable.
 
-### Executive Summary format:
+The deliverable is the confirmed `.pptx` and/or `.docx` from Phase 1 — never a loose chart
+dump or a chat-only answer. To generate the file(s), USE THE CORRESPONDING SKILL:
+
+- For `.pptx` → use the **pptx** skill.
+- For `.docx` → use the **docx** skill.
+
+Read that skill's `SKILL.md` before generating, and follow its conventions for structure,
+styling, and file creation. Save final files to the outputs directory and present them.
+
+### Executive Summary (lead with this in any format):
 
 ```
 [METRIC] changed by [AMOUNT] over [PERIOD] due to:
@@ -299,44 +310,58 @@ Recommendations:
 Key caveat: [most important limitation]
 ```
 
-### Supporting materials:
+### If delivering a `.pptx` — recommended slide structure:
 
-- **Visualizations**: trend charts, segment comparisons, funnel diagrams — only charts that
-  directly support a finding. No decorative charts.
-- **Detailed findings**: technical breakdown for stakeholders who want to dig deeper.
-- **Methodology note**: data sources, cleaning decisions, assumptions, analysis period.
+```
+Slide 1  — Executive Summary
+Slide 2  — Problem Statement & Scope
+Slide 3  — Methodology & Data
+Slides 4–8 — Findings (one message per slide, hypothesis-driven)
+Slide 9  — Recommendations
+Slide 10 — Next Steps & Caveats
+```
+
+### If delivering a `.docx` — recommended section structure:
+
+```
+1. Executive Summary
+2. Problem Statement & Objectives
+3. Data & Methodology
+4. Findings (per hypothesis, with evidence)
+5. Recommendations
+6. Risks, Assumptions & Caveats
+7. Appendix (metric definitions, cleaning decisions)
+```
+
+### Visualization principles (apply in either format):
+
+- One chart = one message. Highlight the insight; don't make the reader decode it.
+- Clarity over beauty. No decorative charts — every chart supports a finding.
+- Label axes, units, and time ranges. Annotate the key takeaway directly on the chart.
 
 ---
 
 ## Reading Excel Files — Technical Notes
 
-Since all inputs are Excel files:
-
-- Always check for multiple sheets — they often represent different entities or time periods.
-- Watch for merged cells, multi-row headers, or metadata rows at the top of sheets.
-  Clean these before processing.
-- Be aware of Excel-specific issues: dates stored as numbers, trailing whitespace in
-  categories, formulas vs. values, hidden sheets.
-- When a sheet has no clear header row, infer it from the data or ask the user.
+- Always check for multiple sheets — they often represent different entities or periods.
+- Watch for merged cells, multi-row headers, or metadata rows at the top of sheets;
+  clean these before processing.
+- Beware Excel quirks: dates stored as numbers, trailing whitespace in categories,
+  formulas vs. values, hidden sheets.
+- If a sheet has no clear header row, infer it from the data or ask the user.
 
 ---
 
 ## Critical Reminders
 
-1. **Never skip Phase 1.** The most common failure mode is jumping into data without
-   understanding the question. A perfect analysis of the wrong question is worthless.
-
-2. **Always `EnterPlanMode` after Phase 1.** The plan is your contract with the user.
-   It ensures alignment before you invest effort in execution.
-
-3. **Hypotheses drive the analysis.** Every analysis step in Phase 4 should be tied to
-   testing a specific hypothesis. Aimless exploration produces noise, not insight.
-
-4. **Output decisions, not dashboards.** The deliverable is "here's what to do and why" —
-   not "here's a chart."
-
-5. **Document everything.** Every cleaning decision, every assumption, every caveat.
-   Reproducibility is non-negotiable.
-
-6. **Grain awareness.** Before any join or aggregation, confirm the grain of each table.
-   This single check prevents the most common class of analytical errors.
+1. **Gate the trigger.** Only run this process for explicit analysis or complex,
+   open-ended questions. Simple lookups, extraction, and manipulation are answered
+   directly — no phases, no `AskUserQuestion`, no `EnterPlanMode`.
+2. **Never skip Phase 1.** A perfect analysis of the wrong question is worthless.
+3. **Confirm the output in Phase 1.** Output format (`.pptx` / `.docx` / both) is never
+   inferable — confirm it via `AskUserQuestion` if the user didn't declare it.
+4. **Always `EnterPlanMode` after Phase 1**, and the plan must strictly follow Phases 2–6.
+5. **Hypotheses are agent-generated, max 3.** Every Phase 4 step tests a specific one.
+6. **Output decisions, not dashboards.** The deliverable is "here's what to do and why".
+7. **Grain awareness.** Confirm the grain of each sheet before any join or aggregation.
+8. **Document everything** — cleaning decisions, assumptions, caveats — for reproducibility.
