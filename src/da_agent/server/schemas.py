@@ -93,14 +93,34 @@ class KbFileResponse(BaseModel):
     id: str
     filename: str
     size_bytes: int
-    status: Literal["PENDING", "PROCESSING", "READY", "FAILED"]
+    # PROCESSING is retained for back-compat with persisted legacy rows that
+    # have not been re-loaded yet; the new pipeline uses PROFILING / READY /
+    # READY_PARTIAL / FAILED.
+    status: Literal[
+        "PENDING",
+        "PROCESSING",
+        "PROFILING",
+        "READY",
+        "READY_PARTIAL",
+        "FAILED",
+    ]
     created_at: float
     updated_at: float
     error: str | None = None
+    memory_path: str | None = None
 
 
 class KbFileListResponse(BaseModel):
     files: list[KbFileResponse]
+
+
+class KbMemoryResponse(BaseModel):
+    """Body for `GET /kb/files/{id}/memory` — raw markdown contents."""
+
+    kb_id: str
+    path: str
+    content: str
+    size_bytes: int
 
 
 # --- KB versions (spec §7, §8.2) ------------------------------------- #
