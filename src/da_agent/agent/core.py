@@ -116,6 +116,10 @@ class AgentRunner:
         # CLI passes None (no path resolution); web wires a closure that has
         # access to the per-session state.
         self._resolve_target = resolve_target
+        # Web path passes the real `sess_<hex16>`; CLI passes None. Stored so
+        # `_build_options` can hand it to `build_system_prompt` and let the
+        # model see the actual outputs subdir name in the prompt body.
+        self._session_id = session_id
         # Phase C 2026-05-31 — observer scopes detection to a single session's
         # outputs subtree. CLI invocations have no real session id; we use
         # `_cli` as a sentinel that still produces a valid (if unused) path.
@@ -180,7 +184,7 @@ class AgentRunner:
                 "docx",
                 "data-analysis",
             ],  # enable spreadsheet, pptx, docx, and DA methodology skills
-            system_prompt=build_system_prompt(s),
+            system_prompt=build_system_prompt(s, session_id=self._session_id),
             agents=build_subagents(),
             allowed_tools=_BASE_TOOLS,
             disallowed_tools=["WebFetch", "WebSearch"],

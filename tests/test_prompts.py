@@ -52,12 +52,14 @@ def test_append_never_mentions_workspace(tmp_path):
     assert "workspace" not in sp["append"].lower()
 
 
-def test_append_documents_versioning_layout(tmp_path):
+def test_append_drops_legacy_versioning_slots(tmp_path):
     sp = build_system_prompt(_settings(tmp_path))
     a = sp["append"]
-    # Both KB and attachments share the v_curr / v_prev slot names.
-    assert "v_curr" in a
-    assert "v_prev" in a
+    # The v_curr / v_prev rollback chain was removed; outputs land flat under
+    # outputs/<session_id>/<filename> and the harness bumps a `_vN` suffix on
+    # collision. The prompt must not reintroduce the legacy slot names.
+    assert "v_curr" not in a
+    assert "v_prev" not in a
 
 
 def test_append_interpolates_runtime_paths(tmp_path):

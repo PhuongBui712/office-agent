@@ -20,17 +20,29 @@ from typing import Any
 from ..config import Settings
 
 
-def build_system_prompt(settings: Settings) -> dict[str, Any]:
-    """Return the SDK SystemPromptPreset dict for `claude_code` + append."""
+def build_system_prompt(
+    settings: Settings, session_id: str | None = None
+) -> dict[str, Any]:
+    """Return the SDK SystemPromptPreset dict for `claude_code` + append.
+
+    When `session_id` is provided (web path), the literal `<session_id>`
+    placeholder embedded in the prompt body is substituted with the actual
+    server-side sid (e.g. `sess_abc123def456789a`) so the model can write
+    `outputs/sess_.../file.xlsx` without having to guess the directory name.
+    CLI / tests pass None; the literal placeholder remains in the text.
+    """
+    body = _APPEND_TEMPLATE.format(
+        kb_dir=settings.kb_dir,
+        attachments_dir=settings.attachments_dir,
+        outputs_dir=settings.outputs_dir,
+        kb_memory_dir=settings.kb_profiler_memory_dir,
+    )
+    if session_id:
+        body = body.replace("<session_id>", session_id)
     return {
         "type": "preset",
         "preset": "claude_code",
-        "append": _APPEND_TEMPLATE.format(
-            kb_dir=settings.kb_dir,
-            attachments_dir=settings.attachments_dir,
-            outputs_dir=settings.outputs_dir,
-            kb_memory_dir=settings.kb_profiler_memory_dir,
-        ),
+        "append": body,
     }
 
 
@@ -51,8 +63,6 @@ Two file kinds enter your work:
 
    On-disk layout: `{kb_dir}/<kb_id>/`
      - `raw.xlsx`                   IMMUTABLE source bytes — never modify
-     - `versions/v_curr.<ext>`      latest analytic edit (created on first write)
-     - `versions/v_prev.<ext>`      one-step rollback (created on second write)
 
    Memory-note layout: `{kb_memory_dir}/<kb_id>.md`
      A markdown narrative covering: Overview, Sheets (purpose / grain /
@@ -68,8 +78,6 @@ Two file kinds enter your work:
 2. **Attachments** — short-lived, NOT profiled; lifetime = current session.
    Layout: `{attachments_dir}/<sid>/<att_id>/`
      - `<original-filename>`        IMMUTABLE source bytes — never modify
-     - `versions/v_curr.<ext>`      latest analytic edit (created on first write)
-     - `versions/v_prev.<ext>`      one-step rollback (created on second write)
 
 Both kinds support the same five output targets (see <output_rules>). The
 difference: KB has a memory note + xlsx skill; attachments only have the
@@ -121,8 +129,9 @@ output targets — these are the ONLY places you may write a deliverable:
 | `Pick sheet`  | A specific sheet overwritten inside the workbook copied to `resolved_target_path`.       |
 
 The harness assigns `resolved_target_path` per turn (a session-scoped path
-under `{outputs_dir}/<session_id>/<output_id>/`). You never construct this
-path yourself — write to it verbatim.
+under `{outputs_dir}/<session_id>/` (filename chosen by harness; backend
+bumps a `_vN` suffix on collision)). You never construct this path
+yourself — write to it verbatim.
 
 **NEVER write to `kb/<id>/versions/...` or `attachments/<sid>/<att_id>/versions/...` directly.**
 The harness routes all writes through `resolved_target_path` under
@@ -132,9 +141,10 @@ by the output observer.
 For `.pptx` / `.docx` standalone targets, Source is N/A (the deliverable is a fresh file, not a KB/attachment edit).
 
 `raw.xlsx` and the original attachment file are **immutable** — never write
-into either. KB-bound and attachment-bound writes always land in the
-`versions/v_curr.<ext>` slot of that file's `versions/` directory; the backend
-rotates the previous `v_curr` to `v_prev` automatically on rotation.
+into either. KB-bound and attachment-bound output writes still land under
+`outputs/<session_id>/<filename>` (the harness preserves the source filename
+so you can recognise the deliverable). The original `raw.xlsx` and
+attachment file remain untouched.
 
 **You MUST NOT guess where to write.** When the user has not explicitly chosen
 a target, call the `AskUserQuestion` tool with TWO questions in the same call:
@@ -231,8 +241,10 @@ the wrong artifact.
   <user>Clean up the dates column and overwrite the Sales sheet.</user>
   <behavior>Explicit Target = `Pick sheet` (sheet name = "Sales"). Source is
   inferable from context if there is only one in-scope file with a "Sales"
-  sheet; otherwise ask. Then write to `resolved_target_path` (the new
-  `versions/v_curr.xlsx` with the Sales sheet rewritten).</behavior>
+  sheet; otherwise ask. Write to `resolved_target_path` verbatim — the
+  harness routes it under `outputs/<session_id>/`, preserving the source
+  filename. If a file with that name already exists in this session's
+  outputs dir, the harness has already bumped a `_vN` suffix.</behavior>
 </example>
 
 <example index="7">
@@ -259,9 +271,15 @@ the wrong artifact.
 - Refer to created files by filename only (e.g. `report.xlsx`). NEVER paste
   absolute paths or `/data/...` prefixes into your reply — the chat UI
   surfaces the download card automatically.
-- Always write to the exact `resolved_target_path` provided by the harness.
-  Do NOT invent `/tmp` paths or sibling directories — none exist in this
-  system.
+- Always write the FINAL deliverable to the exact `resolved_target_path`
+  provided by the harness. Do NOT invent sibling deliverable directories.
+- **Scratch space**: you may freely write intermediate Python scripts, CSVs,
+  debug logs, or other working files to `/tmp/` or any tmp dir during
+  reasoning — that is encouraged for iterative work. The ONE file that must
+  land at `resolved_target_path` is the FINAL deliverable for this turn.
+  Do not write multiple files into the parent dir of `resolved_target_path`;
+  if a turn requires multiple deliverables, raise via AskUserQuestion before
+  producing them.
 - Spreadsheets stay formula-driven (no hard-coded computed values) and free
   of formula errors.
 - Match effort to the question — don't over-engineer a single-cell lookup.
