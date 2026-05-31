@@ -47,13 +47,22 @@ async def client(app):
 async def _register_output(
     app, *, session_id: str | None = None, content: bytes = b"PK fake xlsx"
 ):
-    """Drop a file into outputs_dir/_tmp/, then register it via the registry."""
+    """Drop a file into outputs_dir/_tmp/, then register it via the registry.
+
+    Phase C 2026-05-31: `session_id` is required by the registry layout
+    (`outputs/<session_id>/<output_id>/<filename>`). We default to
+    `sess_default` when the caller doesn't care which session owns the row.
+    `source_session_id` is passed through unchanged so existing assertions
+    on filterable provenance continue to work.
+    """
     state = app.state.app_state
     tmp_dir = state.settings.outputs_dir / "_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     src = tmp_dir / f"src_{id(content):x}.xlsx"
     src.write_bytes(content)
+    layout_sid = session_id or "sess_default"
     meta = await state.outputs.register_standalone(
+        session_id=layout_sid,
         src_path=src,
         title="My report",
         filename="report.xlsx",
@@ -123,7 +132,11 @@ async def test_download_output_returns_file_bytes(client, app):
 
 async def test_delete_output_removes_entry_and_dir(client, app):
     meta = await _register_output(app)
-    out_dir = app.state.app_state.settings.outputs_dir / meta.id
+    # Phase C 2026-05-31: layout is `outputs/<session_id>/<output_id>/`.
+    # `_register_output` defaults `session_id` to "sess_default" when the
+    # caller doesn't pass one, and that's the layout key the registry uses.
+    settings = app.state.app_state.settings
+    out_dir = settings.outputs_dir / "sess_default" / meta.id
     assert out_dir.exists()
 
     r = await client.delete(f"/outputs/{meta.id}")

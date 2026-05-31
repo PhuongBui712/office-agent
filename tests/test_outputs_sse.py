@@ -167,7 +167,8 @@ async def test_write_under_outputs_dir_emits_output_created(app, client):
     sid = create.json()["id"]
 
     state = app.state.app_state
-    out_dir = state.settings.outputs_dir / "out_abc123"
+    # Phase C 2026-05-31 layout: outputs/<sid>/<out_id>/<filename>.
+    out_dir = state.settings.outputs_dir / sid / "out_abc123"
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / "report.xlsx"
     payload = b"PK\x03\x04 fake xlsx"
@@ -236,8 +237,15 @@ async def test_write_under_outputs_dir_emits_output_created(app, client):
         assert payload["download_url"] == "/outputs/out_abc123"
 
 
-async def test_write_under_kb_versions_emits_output_created_kb_version(app, client):
-    """Spec §8.2 — a write to `kb/<id>/versions/v_curr.xlsx` emits SSE."""
+async def test_write_under_kb_versions_does_NOT_emit_anymore(app, client):
+    """DEPRECATED 2026-05-31: writes under `kb/<id>/versions/` no longer emit.
+
+    Phase C broke Golden Rule 4 per user approval: KB-bound deliverables now
+    land under `outputs/<sid>/<out_id>/<filename>` instead of the legacy
+    versions chain. The observer's kb_version branch returns None, so a
+    direct Write into `kb_dir` produces no `output.created` event and no
+    registry row.
+    """
     create = await client.post("/sessions", json={"name": "kbv-sse"})
     sid = create.json()["id"]
 
@@ -278,32 +286,27 @@ async def test_write_under_kb_versions_emits_output_created_kb_version(app, clie
     finally:
         _restore_init(original)
 
-    # Sidecar should land best-effort.
-    sidecar = versions_dir / "v_curr.meta.json"
-    for _ in range(50):
-        if sidecar.exists():
-            break
-        await asyncio.sleep(0.01)
+    # Give any fire-and-forget detection task a tick to run before asserting
+    # absence — we want to be sure no event is *ever* emitted, not just that
+    # the SSE response returned before adoption.
+    await asyncio.sleep(0.05)
 
-    assert sidecar.exists(), "sidecar v_curr.meta.json should be written"
-    sidecar_data = json.loads(sidecar.read_text("utf-8"))
-    assert sidecar_data["version"] == "v_curr"
-    assert sidecar_data["parent_version"] == "v_prev"
-    assert sidecar_data["kind"] == "kb_version"
-    assert sidecar_data["source_session_id"] == sid
-
-    # If the SSE caught the event, validate it; otherwise pass — the sidecar
-    # plus registry-side observable state is the authoritative check.
     output_events = [(t, p) for t, p in events if t == "output.created"]
-    if output_events:
-        _, p = output_events[0]
-        assert p["kind"] == "kb_version"
-        assert p["kb_id"] == "kb_xyz"
-        assert p["version"] == "v_curr"
+    assert output_events == [], (
+        f"kb_version writes should NOT emit output.created (got {output_events})"
+    )
+
+    # And nothing in the standalone registry was minted from this write.
+    listed = await state.outputs.list()
+    assert listed == []
 
 
-async def test_write_under_attachment_versions_emits_output_created(app, client):
-    """Spec §8.2 — symmetric attachment-version detection + SSE."""
+async def test_write_under_attachment_versions_does_NOT_emit_anymore(app, client):
+    """DEPRECATED 2026-05-31: writes under `attachments/<sid>/<att>/versions/` no longer emit.
+
+    Symmetric to the kb_version case above — Phase C routes attachment-bound
+    deliverables under `outputs/<sid>/<out_id>/<filename>`.
+    """
     create = await client.post("/sessions", json={"name": "att-sse"})
     sid = create.json()["id"]
 
@@ -346,21 +349,11 @@ async def test_write_under_attachment_versions_emits_output_created(app, client)
     finally:
         _restore_init(original)
 
-    sidecar = versions_dir / "v_curr.meta.json"
-    for _ in range(50):
-        if sidecar.exists():
-            break
-        await asyncio.sleep(0.01)
-
-    assert sidecar.exists(), "attachment_version sidecar should be written"
-    sidecar_data = json.loads(sidecar.read_text("utf-8"))
-    assert sidecar_data["kind"] == "attachment_version"
-    assert sidecar_data["version"] == "v_curr"
+    await asyncio.sleep(0.05)
 
     output_events = [(t, p) for t, p in events if t == "output.created"]
-    if output_events:
-        _, p = output_events[0]
-        assert p["kind"] == "attachment_version"
-        assert p["session_id"] == sid
-        assert p["attachment_id"] == "att_42"
-        assert p["version"] == "v_curr"
+    assert output_events == [], (
+        f"attachment_version writes should NOT emit output.created (got {output_events})"
+    )
+    listed = await state.outputs.list()
+    assert listed == []

@@ -1,10 +1,18 @@
 """Tests for the (Target, Source) → resolved_target_path resolver (spec §8.2).
 
+Phase C 2026-05-31 (Golden Rule 4 broken per user approval): ALL targets —
+including KB-bound and attachment-bound — resolve under
+`outputs/<session_id>/<output_id>/<filename>`. The legacy `versions/` chain
+in `kb/<kb_id>/` and `attachments/<sid>/<att_id>/` is no longer written to;
+`resolved_target_kind` still reports `kb_version` / `attachment_version` so
+the agent's mental model stays intact.
+
 Covers:
-- New .xlsx → outputs/<output_id>/output.xlsx (mints output_id, creates dir)
-- New sheet / Pick sheet on a READY KB → kb/<id>/versions/v_curr.<ext>
-  with pre-write rotation (existing v_curr → v_prev).
-- New sheet / Pick sheet on an attachment → attachments/<sid>/<att_id>/versions/v_curr.<ext>.
+- New .xlsx / .pptx / .docx → outputs/<sid>/<out_id>/output.<ext>.
+- New sheet / Pick sheet on a READY KB → outputs/<sid>/<out_id>/<source_filename>,
+  kind=kb_version.
+- New sheet / Pick sheet on an attachment → outputs/<sid>/<out_id>/<source_filename>,
+  kind=attachment_version.
 - Validation deny: too few answers, unknown ids, non-READY kb, missing source.
 - Header-fence: arbitrary clarifications (header != "Target") get no resolved path.
 """
@@ -48,49 +56,52 @@ def _ans(target: str, source: str) -> list[dict]:
 
 
 async def test_new_xlsx_mints_output_id_and_creates_dir(state):
+    sid = "sess_001"
     res = await _resolve_output_target(
         raw_questions=_make_target_questions(),
         raw_answers=_ans("New .xlsx", "N/A"),
         state=state,
-        sid="sess_001",
+        sid=sid,
     )
 
     assert res.resolved_target_kind == "standalone"
     p = Path(res.resolved_target_path)
-    # outputs/<out_*>/output.xlsx
-    assert p.parent.parent == state.settings.outputs_dir
+    # Phase C 2026-05-31 layout: outputs/<sid>/<out_*>/output.xlsx
+    assert p.parent.parent == state.settings.outputs_session_dir(sid)
     assert p.parent.name.startswith("out_")
     assert p.name == "output.xlsx"
     assert p.parent.is_dir()  # directory was created
 
 
 async def test_new_pptx_mints_standalone_dir(state):
+    sid = "sess_001"
     res = await _resolve_output_target(
         raw_questions=_make_target_questions(),
         raw_answers=_ans("New .pptx", "N/A"),
         state=state,
-        sid="sess_001",
+        sid=sid,
     )
 
     assert res.resolved_target_kind == "standalone"
     p = Path(res.resolved_target_path)
-    assert p.parent.parent == state.settings.outputs_dir
+    assert p.parent.parent == state.settings.outputs_session_dir(sid)
     assert p.parent.name.startswith("out_")
     assert p.name == "output.pptx"
     assert p.parent.is_dir()
 
 
 async def test_new_docx_mints_standalone_dir(state):
+    sid = "sess_001"
     res = await _resolve_output_target(
         raw_questions=_make_target_questions(),
         raw_answers=_ans("New .docx", "N/A"),
         state=state,
-        sid="sess_001",
+        sid=sid,
     )
 
     assert res.resolved_target_kind == "standalone"
     p = Path(res.resolved_target_path)
-    assert p.parent.parent == state.settings.outputs_dir
+    assert p.parent.parent == state.settings.outputs_session_dir(sid)
     assert p.parent.name.startswith("out_")
     assert p.name == "output.docx"
     assert p.parent.is_dir()
@@ -136,7 +147,14 @@ async def test_unknown_target_lists_all_five_valid(state):
     assert "Pick sheet" in msg
 
 
-async def test_new_sheet_on_ready_kb_resolves_to_v_curr(state):
+async def test_new_sheet_on_ready_kb_resolves_to_outputs_session_dir(state):
+    """Phase C 2026-05-31: KB-bound writes land under outputs/<sid>/<out_*>/.
+
+    `resolved_target_kind` still reports `kb_version` so the agent / UI
+    surface unchanged, but the path is in the standalone tree and uses the
+    KB's source filename (so users see `Sales.xlsx`, not `v_curr.xlsx`).
+    """
+    sid = "sess_001"
     kb = await state.kb.create(filename="Sales.xlsx", size_bytes=10)
     await state.kb.update_status(kb.id, "READY")
 
@@ -144,16 +162,20 @@ async def test_new_sheet_on_ready_kb_resolves_to_v_curr(state):
         raw_questions=_make_target_questions(),
         raw_answers=_ans("New sheet", kb.id),
         state=state,
-        sid="sess_001",
+        sid=sid,
     )
 
     assert res.resolved_target_kind == "kb_version"
-    expected = state.settings.kb_dir / kb.id / "versions" / "v_curr.xlsx"
-    assert Path(res.resolved_target_path) == expected
-    assert expected.parent.is_dir()
+    p = Path(res.resolved_target_path)
+    assert p.parent.parent == state.settings.outputs_session_dir(sid)
+    assert p.parent.name.startswith("out_")
+    assert p.name == "Sales.xlsx"  # source filename, not v_curr.xlsx
+    assert p.parent.is_dir()
 
 
 async def test_pick_sheet_with_sheet_qualifier_resolves(state):
+    """Pick sheet on a KB resolves under outputs/<sid>/<out_*>/<source_filename>."""
+    sid = "sess_001"
     kb = await state.kb.create(filename="Sales.xlsx", size_bytes=10)
     await state.kb.update_status(kb.id, "READY")
 
@@ -161,34 +183,22 @@ async def test_pick_sheet_with_sheet_qualifier_resolves(state):
         raw_questions=_make_target_questions(),
         raw_answers=_ans("Pick sheet", f"{kb.id}::Q1"),
         state=state,
-        sid="sess_001",
+        sid=sid,
     )
 
     assert res.resolved_target_kind == "kb_version"
-    assert Path(res.resolved_target_path).name == "v_curr.xlsx"
+    p = Path(res.resolved_target_path)
+    assert p.parent.parent == state.settings.outputs_session_dir(sid)
+    assert p.parent.name.startswith("out_")
+    assert p.name == "Sales.xlsx"
 
 
-async def test_resolution_rotates_existing_v_curr_to_v_prev(state):
-    kb = await state.kb.create(filename="Sales.xlsx", size_bytes=10)
-    await state.kb.update_status(kb.id, "READY")
-    versions_dir = state.settings.kb_dir / kb.id / "versions"
-    versions_dir.mkdir(parents=True, exist_ok=True)
-    (versions_dir / "v_curr.xlsx").write_bytes(b"first-revision")
+async def test_attachment_target_resolves_under_outputs_session_dir(state):
+    """Phase C 2026-05-31: attachment-bound writes also land under outputs/<sid>/.
 
-    await _resolve_output_target(
-        raw_questions=_make_target_questions(),
-        raw_answers=_ans("New sheet", kb.id),
-        state=state,
-        sid="sess_001",
-    )
-
-    # The previously-current bytes are now v_prev; v_curr is cleared so the
-    # model can drop its new bytes there.
-    assert not (versions_dir / "v_curr.xlsx").exists()
-    assert (versions_dir / "v_prev.xlsx").read_bytes() == b"first-revision"
-
-
-async def test_attachment_target_resolves_under_session(state):
+    `resolved_target_kind` is `attachment_version` for surface-area parity
+    but the path is in the standalone tree under the per-session dir.
+    """
     sid = "sess_42"
     att = await state.attachments.create(
         sid, filename="upload.xlsx", size_bytes=10, mime="application/x-xlsx"
@@ -202,10 +212,11 @@ async def test_attachment_target_resolves_under_session(state):
     )
 
     assert res.resolved_target_kind == "attachment_version"
-    expected = (
-        state.settings.attachments_dir / sid / att.id / "versions" / "v_curr.xlsx"
-    )
-    assert Path(res.resolved_target_path) == expected
+    p = Path(res.resolved_target_path)
+    assert p.parent.parent == state.settings.outputs_session_dir(sid)
+    assert p.parent.name.startswith("out_")
+    assert p.name == "upload.xlsx"  # source filename, not v_curr.xlsx
+    assert p.parent.is_dir()
 
 
 async def test_unknown_kb_id_raises_validation_error(state):
@@ -287,7 +298,11 @@ def test_header_fence_skips_non_target_questions():
     )
 
 
-async def test_attachment_extension_inferred_from_filename(state):
+async def test_attachment_filename_preserved_in_outputs_path(state):
+    """The source attachment's filename (e.g. data.csv) is reused as the on-disk
+    name under outputs/<sid>/<out_*>/. This is what the user sees in the
+    outputs view, so preserving the original name is part of the contract.
+    """
     sid = "sess_42"
     att = await state.attachments.create(
         sid, filename="data.csv", size_bytes=10, mime="text/csv"
@@ -300,4 +315,6 @@ async def test_attachment_extension_inferred_from_filename(state):
         sid=sid,
     )
 
-    assert Path(res.resolved_target_path).name == "v_curr.csv"
+    p = Path(res.resolved_target_path)
+    assert p.name == "data.csv"
+    assert p.parent.parent == state.settings.outputs_session_dir(sid)
