@@ -139,7 +139,12 @@ class AgentRunner:
         return ClaudeAgentOptions(
             cwd=str(s.project_root),
             setting_sources=["project", "local"],  # discover .claude/skills
-            skills=["xlsx"],  # enable only the spreadsheet skill
+            skills=[
+                "xlsx",
+                "pptx",
+                "docx",
+                "data-analysis",
+            ],  # enable spreadsheet, pptx, docx, and DA methodology skills
             system_prompt=build_system_prompt(s),
             agents=build_subagents(),
             allowed_tools=_BASE_TOOLS,
