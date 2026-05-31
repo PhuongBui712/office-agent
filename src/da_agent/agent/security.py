@@ -269,28 +269,49 @@ _DENY_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
-# Write-verb tokens that, when co-located with `raw.xlsx`, indicate a
-# Golden-Rule-4 violation. Any one match in a command containing
-# `raw.xlsx` triggers a deny.
-_RAW_XLSX_WRITE_VERBS = re.compile(
-    r"\b(?:to_excel|ExcelWriter|\.save\s*\(|"
-    r"open\s*\([^)]*['\"][raw\\][^)]*[ab+w])"
+# Match patterns where raw.xlsx is the TARGET of a write operation. Each
+# alternative captures `raw.xlsx` only when it is being WRITTEN, not READ —
+# so `load_workbook(.../raw.xlsx)` paired with `wb_new.save(.../other.xlsx)`
+# in the same command no longer trips the deny.
+_RAW_XLSX_WRITE_TARGET_RE = re.compile(
+    r"""(?x)
+    # Shell redirects: cmd > raw.xlsx, cmd >> raw.xlsx
+    (?:>{1,2}\s*[^|<>]*?raw\.xlsx)
+    |
+    # tee target
+    (?:\btee\s+(?:-\w+\s+)*[^|<>]*?raw\.xlsx)
+    |
+    # --output flag
+    (?:--output[= ]\S*?raw\.xlsx)
+    |
+    # cp/mv/rsync/install with raw.xlsx as 2nd positional (target)
+    (?:\b(?:cp|mv|rsync|install)\s+(?:-\w+\s+)*\S+\s+\S*?raw\.xlsx\b)
+    |
+    # shutil.copy/copy2/move/copyfile/rename with raw.xlsx as 2nd arg
+    (?:shutil\.(?:copy|copy2|copyfile|move|rename)\s*\([^,]+,\s*[\"'][^\"']*?raw\.xlsx)
+    |
+    # Python writes to raw.xlsx
+    (?:\.(?:save|to_excel|to_csv)\s*\(\s*[\"'][^\"']*?raw\.xlsx)
+    |
+    (?:ExcelWriter\s*\(\s*[\"'][^\"']*?raw\.xlsx)
+    |
+    (?:open\s*\(\s*[\"'][^\"']*?raw\.xlsx[\"']\s*,\s*[\"'][ab+wx])
+    """
 )
-_RAW_XLSX_REF = re.compile(r"\braw\.xlsx\b")
 
 
 def _match_deny_pattern(command: str) -> str | None:
     for pattern, reason in _DENY_PATTERNS:
         if pattern.search(command):
             return reason
-    # Golden Rule 4 — `raw.xlsx` write attempt. Two-clause check: the
-    # filename is referenced AND a write verb is present in the same
-    # command. Read-only references (`pd.read_excel("raw.xlsx")`) are
-    # untouched.
-    if _RAW_XLSX_REF.search(command) and _RAW_XLSX_WRITE_VERBS.search(command):
+    # Golden Rule 4 — only deny when `raw.xlsx` is the actual write target,
+    # not when it is merely mentioned (e.g. `load_workbook(raw.xlsx)` paired
+    # with a save to a different file).
+    if _RAW_XLSX_WRITE_TARGET_RE.search(command):
         return (
-            "Writing to raw.xlsx is blocked (Golden Rule 4 — KB original is "
-            "immutable). Use kb/<id>/versions/v_curr.xlsx instead."
+            "Writes to raw.xlsx are blocked (KB original is immutable). "
+            "Write your output to the resolved_target_path under "
+            "outputs/<session_id>/."
         )
     return None
 
