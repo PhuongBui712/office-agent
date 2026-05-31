@@ -13,6 +13,7 @@ dist/
 
 # data
 data/
+.claude/agent-memory-local
 
 # Agent Cred
 .claude/settings.json
