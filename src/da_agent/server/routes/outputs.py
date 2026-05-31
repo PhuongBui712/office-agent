@@ -23,6 +23,7 @@ def get_state(request: Request) -> AppState:
 def _meta_to_response(meta) -> OutputResponse:
     return OutputResponse(
         output_id=meta.id,
+        download_url=f"/outputs/{meta.id}",
         kind=meta.kind,
         title=meta.title,
         filename=meta.filename,

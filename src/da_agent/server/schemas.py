@@ -154,6 +154,7 @@ class AttachmentListResponse(BaseModel):
 # --- Outputs (spec §8.2) --------------------------------------------- #
 class OutputResponse(BaseModel):
     output_id: str
+    download_url: str  # f"/outputs/{output_id}"
     kind: Literal["standalone", "kb_version"]
     title: str
     filename: str
