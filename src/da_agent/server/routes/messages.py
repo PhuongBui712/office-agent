@@ -12,8 +12,6 @@ Per-message lifecycle:
 from __future__ import annotations
 
 import asyncio
-import mimetypes
-import secrets
 from pathlib import Path
 from typing import Any
 
@@ -36,15 +34,17 @@ def get_state(request: Request) -> AppState:
     return request.app.state.app_state
 
 
-def _new_output_id() -> str:
-    """Mint `out_<16hex>` matching `OutputsRegistry._new_id` shape."""
-    return f"out_{secrets.token_hex(8)}"
-
-
-def _suffix_for(filename: str) -> str:
-    """Return `.<ext>` (lowercased) or `.xlsx` if there's no extension."""
-    ext = Path(filename).suffix.lower()
-    return ext or ".xlsx"
+def _unique_filename(parent: Path, base: str, ext: str) -> str:
+    """Return a filename like 'base.ext' or 'base_v2.ext' that doesn't exist in `parent` yet."""
+    candidate = f"{base}{ext}"
+    if not (parent / candidate).exists():
+        return candidate
+    n = 2
+    while True:
+        candidate = f"{base}_v{n}{ext}"
+        if not (parent / candidate).exists():
+            return candidate
+        n += 1
 
 
 def _intersection_kb_options(
@@ -67,13 +67,9 @@ async def _resolve_output_target(
 ) -> TargetResolution:
     """Spec §8.2 — validate (Target, Source) and resolve absolute write path.
 
-    Phase C 2026-05-31: ALL targets land under
-    `outputs/<session_id>/<output_id>/<filename>`. The legacy `versions/`
-    chain in `kb/<kb_id>/` and `attachments/<sid>/<att_id>/` is no longer
-    written to (Golden Rule 4 broken per user approval). `resolved_target_kind`
-    still reports `kb_version` / `attachment_version` for KB/attachment
-    targets so the agent's mental model stays intact, but the path lands
-    under outputs.
+    Phase A 2026-06-01: ALL targets land flat under
+    `outputs/<session_id>/<filename>`. Filename collisions in the same
+    session get a `_vN` suffix bumped by `_unique_filename`.
 
     Raises `TargetValidationError` on any validation failure (the
     permission gate maps it to `PermissionResultDeny`).
@@ -91,22 +87,19 @@ async def _resolve_output_target(
     kb_metas = await state.kb.list()
     att_metas = await state.attachments.list(sid)
 
-    _STANDALONE_DEFAULTS = {
-        "New .xlsx": "output.xlsx",
-        "New .pptx": "output.pptx",
-        "New .docx": "output.docx",
-    }
     session_root = state.settings.outputs_session_dir(sid)
-    if target in _STANDALONE_DEFAULTS:
-        # Source is N/A (or any answer). Mint a new output_id and a default
-        # filename. The model picks the actual filename when it writes; we
-        # simply give it a sandboxed directory.
-        output_id = _new_output_id()
-        out_dir = session_root / output_id
-        out_dir.mkdir(parents=True, exist_ok=True)
-        filename = _STANDALONE_DEFAULTS[target]
+    session_root.mkdir(parents=True, exist_ok=True)
+
+    _STANDALONE_EXT = {
+        "New .xlsx": ".xlsx",
+        "New .pptx": ".pptx",
+        "New .docx": ".docx",
+    }
+    if target in _STANDALONE_EXT:
+        ext = _STANDALONE_EXT[target]
+        filename = _unique_filename(session_root, "output", ext)
         return TargetResolution(
-            resolved_target_path=str(out_dir / filename),
+            resolved_target_path=str(session_root / filename),
             resolved_target_kind="standalone",
         )
 
@@ -122,27 +115,22 @@ async def _resolve_output_target(
             if head not in allowed:
                 raise TargetValidationError(f"unknown or non-READY kb_id: {head}")
             meta = next(m for m in kb_metas if m.id == head)
-            output_id = _new_output_id()
-            out_dir = session_root / output_id
-            out_dir.mkdir(parents=True, exist_ok=True)
-            # Preserve the source filename so the user recognises the
-            # deliverable in the outputs view (`Sales.xlsx` rather than
-            # `v_curr.xlsx`).
-            filename = meta.filename or f"output{_suffix_for(meta.filename)}"
+            base = Path(meta.filename).stem or "output"
+            ext = Path(meta.filename).suffix or ".xlsx"
+            filename = _unique_filename(session_root, base, ext)
             return TargetResolution(
-                resolved_target_path=str(out_dir / filename),
+                resolved_target_path=str(session_root / filename),
                 resolved_target_kind="kb_version",
             )
         if head.startswith("att_"):
             att = next((a for a in att_metas if a.id == head), None)
             if att is None:
                 raise TargetValidationError(f"unknown attachment_id: {head}")
-            output_id = _new_output_id()
-            out_dir = session_root / output_id
-            out_dir.mkdir(parents=True, exist_ok=True)
-            filename = att.filename or f"output{_suffix_for(att.filename)}"
+            base = Path(att.filename).stem or "output"
+            ext = Path(att.filename).suffix or ".xlsx"
+            filename = _unique_filename(session_root, base, ext)
             return TargetResolution(
-                resolved_target_path=str(out_dir / filename),
+                resolved_target_path=str(session_root / filename),
                 resolved_target_kind="attachment_version",
             )
         raise TargetValidationError(
@@ -185,8 +173,8 @@ async def _ensure_runner(runtime: SessionRuntime, state: AppState) -> None:
         raw_answers: list[dict[str, Any]],
     ) -> TargetResolution:
         # Spec §8.2 — invoked from `permissions.py` after the FE answer
-        # arrives. Phase C 2026-05-31: routes ALL targets under
-        # `outputs/<sid>/<output_id>/<filename>`.
+        # arrives. Phase A 2026-06-01: routes ALL targets flat under
+        # `outputs/<sid>/<filename>`.
         return await _resolve_output_target(
             raw_questions=raw_questions,
             raw_answers=raw_answers,
@@ -216,36 +204,33 @@ async def _handle_output_detection(
 ) -> None:
     """Spec §8.2 — register the detected file and emit `output.created`.
 
-    Phase C 2026-05-31: only `standalone` detections fire (the observer no
-    longer emits `kb_version` / `attachment_version` — see
-    `outputs/observer.py`). All deliverables, including those originally
-    requested as KB-bound or attachment-bound, land under
-    `outputs/<session_id>/<output_id>/<filename>` and adopt cleanly.
+    Phase A 2026-06-01: only `standalone` detections fire (the observer no
+    longer emits `kb_version` / `attachment_version`). The registry mints
+    `output_id` on adoption and writes the sidecar; we surface the freshly
+    minted id back to the FE.
     """
+    if det.kind != "standalone":
+        return
     sid = runtime.meta.id
-    if det.kind == "standalone" and det.output_id and det.filename:
-        # Filename may be a nested path under <output_id>/ — registry stores
-        # only the final segment as the on-disk name.
-        filename = det.filename.rsplit("/", 1)[-1]
-        mime, _ = mimetypes.guess_type(filename)
-        meta = await state.outputs.adopt_at(
-            output_id=det.output_id,
-            session_id=sid,
-            title=filename,
-            filename=filename,
-            mime=mime or "application/octet-stream",
-            source_session_id=sid,
-        )
-        if meta is None:
-            return
-        ui.on_output(
-            {
-                "output_id": meta.id,
-                "kind": "standalone",
-                "title": meta.title,
-                "download_url": f"/outputs/{meta.id}",
-            }
-        )
+    meta = await state.outputs.register_standalone(
+        session_id=sid,
+        file_path=det.file_path,
+        filename=det.filename,
+        kind="standalone",
+        source_id=None,
+    )
+    ui.on_output(
+        {
+            "output_id": meta.id,
+            "kind": meta.kind,
+            "title": meta.filename,
+            "filename": meta.filename,
+            "size_bytes": meta.size_bytes,
+            "mime": meta.mime,
+            "download_url": f"/outputs/{meta.id}",
+            "created_at": meta.created_at,
+        }
+    )
 
 
 @router.post("/{sid}/messages")
