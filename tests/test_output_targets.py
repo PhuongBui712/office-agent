@@ -64,6 +64,78 @@ async def test_new_xlsx_mints_output_id_and_creates_dir(state):
     assert p.parent.is_dir()  # directory was created
 
 
+async def test_new_pptx_mints_standalone_dir(state):
+    res = await _resolve_output_target(
+        raw_questions=_make_target_questions(),
+        raw_answers=_ans("New .pptx", "N/A"),
+        state=state,
+        sid="sess_001",
+    )
+
+    assert res.resolved_target_kind == "standalone"
+    p = Path(res.resolved_target_path)
+    assert p.parent.parent == state.settings.outputs_dir
+    assert p.parent.name.startswith("out_")
+    assert p.name == "output.pptx"
+    assert p.parent.is_dir()
+
+
+async def test_new_docx_mints_standalone_dir(state):
+    res = await _resolve_output_target(
+        raw_questions=_make_target_questions(),
+        raw_answers=_ans("New .docx", "N/A"),
+        state=state,
+        sid="sess_001",
+    )
+
+    assert res.resolved_target_kind == "standalone"
+    p = Path(res.resolved_target_path)
+    assert p.parent.parent == state.settings.outputs_dir
+    assert p.parent.name.startswith("out_")
+    assert p.name == "output.docx"
+    assert p.parent.is_dir()
+
+
+async def test_new_pptx_ignores_source(state):
+    res = await _resolve_output_target(
+        raw_questions=_make_target_questions(),
+        raw_answers=_ans("New .pptx", "kb_anything"),
+        state=state,
+        sid="sess_001",
+    )
+
+    assert res.resolved_target_kind == "standalone"
+    assert Path(res.resolved_target_path).name == "output.pptx"
+
+
+async def test_new_docx_ignores_source(state):
+    res = await _resolve_output_target(
+        raw_questions=_make_target_questions(),
+        raw_answers=_ans("New .docx", "kb_anything"),
+        state=state,
+        sid="sess_001",
+    )
+
+    assert res.resolved_target_kind == "standalone"
+    assert Path(res.resolved_target_path).name == "output.docx"
+
+
+async def test_unknown_target_lists_all_five_valid(state):
+    with pytest.raises(TargetValidationError) as excinfo:
+        await _resolve_output_target(
+            raw_questions=_make_target_questions(),
+            raw_answers=_ans("New .pdf", "N/A"),
+            state=state,
+            sid="sess_001",
+        )
+    msg = str(excinfo.value)
+    assert "New .xlsx" in msg
+    assert "New .pptx" in msg
+    assert "New .docx" in msg
+    assert "New sheet" in msg
+    assert "Pick sheet" in msg
+
+
 async def test_new_sheet_on_ready_kb_resolves_to_v_curr(state):
     kb = await state.kb.create(filename="Sales.xlsx", size_bytes=10)
     await state.kb.update_status(kb.id, "READY")

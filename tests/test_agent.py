@@ -101,14 +101,14 @@ def _runner(ui=None, *, plan_first: bool = True):
 # --------------------------------------------------------------------------- #
 def test_options_assembly():
     opts = _runner()._build_options()
-    assert opts.skills == ["xlsx"]
+    assert opts.skills == ["xlsx", "pptx", "docx", "data-analysis"]
     assert "project" in opts.setting_sources
     assert opts.permission_mode == "plan"
     # AskUserQuestion is the built-in tool we route through can_use_tool now —
     # there is no longer a custom MCP server registered for it.
     assert "AskUserQuestion" in opts.allowed_tools
     assert not opts.mcp_servers
-    assert set(opts.agents) == {"profiler", "analyst", "visualizer"}
+    assert set(opts.agents) == {"profiler", "analyst", "reporter"}
     assert callable(opts.can_use_tool)
     assert opts.env["CLAUDE_CONFIG_DIR"].endswith("sessions")
     # Spec §8.2 — system prompt is the SDK preset+append dict shape.

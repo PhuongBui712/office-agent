@@ -87,3 +87,45 @@ def test_append_warns_about_immutable_sources(tmp_path):
     # The model must never modify raw.xlsx or the original attachment file.
     assert "raw.xlsx" in a
     assert "IMMUTABLE" in a or "immutable" in a.lower()
+
+
+def test_append_lists_expanded_5_target_labels(tmp_path):
+    sp = build_system_prompt(_settings(tmp_path))
+    a = sp["append"]
+    # The two new standalone-deliverable targets (spec §8.2 expansion).
+    assert "New .pptx" in a
+    assert "New .docx" in a
+    # The pre-existing three are still enumerated.
+    assert "New .xlsx" in a
+    assert "New sheet" in a
+    assert "Pick sheet" in a
+
+
+def test_append_references_data_analysis_skill(tmp_path):
+    sp = build_system_prompt(_settings(tmp_path))
+    a = sp["append"]
+    # The skill is loaded automatically for analytical questions; the prompt
+    # must defer to it explicitly (case-sensitive on the canonical name).
+    assert "data-analysis skill" in a
+
+
+def test_append_includes_analytical_why_example(tmp_path):
+    sp = build_system_prompt(_settings(tmp_path))
+    a = sp["append"]
+    # Example #7 demonstrates the skill flow on a Vietnamese "why" question.
+    assert "Tại sao doanh thu Q2" in a
+
+
+def test_append_clarifies_source_na_for_standalone_targets(tmp_path):
+    sp = build_system_prompt(_settings(tmp_path))
+    a = sp["append"]
+    # The new sentence under the targets table.
+    assert "Source is N/A" in a
+
+
+def test_append_drops_stale_3_target_enumeration(tmp_path):
+    sp = build_system_prompt(_settings(tmp_path))
+    a = sp["append"]
+    # The old AskUserQuestion options enumeration listed only the original
+    # three targets; the expansion replaces it with the 5-label form.
+    assert "New .xlsx, New sheet, Pick sheet" not in a
